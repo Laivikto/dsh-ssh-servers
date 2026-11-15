@@ -3,6 +3,15 @@
 本项目的所有重要变更都记录在此文件。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.1] - 2026-11-15
+
+仅文档与发布配置变更，无功能改动。
+
+### 变更
+
+- **npm 安装成为首选的安装方式**：README（中文与英文）把「设置 → 插件 → 添加插件，输入包名」提到方式一，GitHub 压缩包下载降为方式二，本地 `link:` 联调降为方式三。
+- `package.json` 增加 `publishConfig.access: public`，让 scoped 包可以直接发布到 npm。
+
 ## [1.2.0] - 2026-11-15
 
 本版本包含远端文件浏览，以及对上一版的一次完整代码审计与缺陷修复。
