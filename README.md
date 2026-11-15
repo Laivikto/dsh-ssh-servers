@@ -18,55 +18,36 @@ English | [简体中文](./README.zh.md)
 
 ## Installation
 
-### Option 1: npm (recommended)
+Distributed via npm. Two ways to install — pick either one.
 
-The plugin is published on npm, so installing and updating needs no archive and no manual file copying.
+### Option 1: DSH Desktop (GUI)
 
-In DSH Desktop open **Settings → Plugins → Add plugin** and enter the package name:
+1. Open DSH Desktop
+2. Open **Settings → Plugins**
+3. Click **Add plugin**
+4. Enter the package name `@laivikto/dsh-ssh-servers`
+5. Confirm, then restart DSH
+6. An **SSH Cloud Servers** tab appears in the right sidebar
 
-```
-@laivikto/dsh-ssh-servers
-```
+### Option 2: Command line (copy & paste)
 
-The plugin manager installs it into your profile and registers its bundle. Restart DSH and an **SSH Cloud Servers** tab appears in the right sidebar. To update later, use the same add/update action in the plugin manager.
-
-Or wire it into the profile by hand:
-
-```json
-{
-  "dependencies": {
-    "@laivikto/dsh-ssh-servers": "^1.2.0"
-  }
-}
+```bash
+dsh plugin add @laivikto/dsh-ssh-servers
 ```
 
-Also add `"@laivikto/dsh-ssh-servers"` to `dsh.profile.bundles`, then restart DSH.
+With a specific profile:
 
-> Do not run `pnpm` manually or edit `cordis.patch.yml` — DSH's plugin manager handles those steps.
-
-### Option 2: Download from GitHub
-
-1. Download the archive:
-   <https://github.com/Laivikto/dsh-ssh-servers/archive/refs/heads/main.zip>
-   (or `git clone` it)
-2. Extract anywhere, e.g. `D:\plugins\dsh-ssh-servers`
-3. In DSH Desktop open **Settings → Plugins** and click **Add plugin**
-4. Select the extracted directory
-5. Restart DSH; an **SSH Cloud Servers** tab appears in the right sidebar
-
-### Option 3: Local development link
-
-Point the profile at the repository:
-
-```json
-{
-  "dependencies": {
-    "@laivikto/dsh-ssh-servers": "link:E:/path/to/dsh-ssh-servers"
-  }
-}
+```bash
+dsh --profile desktop plugin add @laivikto/dsh-ssh-servers
 ```
 
-Also add `"@laivikto/dsh-ssh-servers"` to `dsh.profile.bundles`, then restart DSH.
+Restart DSH after it finishes. Upgrade later with:
+
+```bash
+dsh plugin update
+```
+
+> The plugin manager writes the profile dependency and the `dsh.profile.bundles` entry for you — do not run `pnpm` or edit `cordis.patch.yml` by hand.
 
 ### Uninstall
 
