@@ -1,6 +1,6 @@
 # SSH Cloud Servers
 
-Manage SSH servers from the DSH Desktop right sidebar: custom names, saved key or password credentials, and IPv4 / IPv6 / dual-stack display. After connecting, the card updates in place and an SSH terminal is established, and the read-only review prompt is copied to your clipboard so you can paste it wherever you like.
+Manage SSH servers from the DSH Desktop right sidebar: custom names, saved key or password credentials, and IPv4 / IPv6 / dual-stack display. After connecting, the card updates in place and an SSH terminal is established, and a task prompt is copied to your clipboard so you can paste it wherever you like. A companion tab browses remote files over a separate SSH channel.
 
 English | [简体中文](./README.zh.md)
 
@@ -11,8 +11,9 @@ English | [简体中文](./README.zh.md)
 - **Native private-key picker** — no more pasting paths by hand. Click **Browse…**, choose a folder, pick the file from the list, and the absolute path is filled in automatically.
 - **Live connection health** — checked every 30 seconds; `✓ Connected` / `✗ Unresponsive` shown directly on the server card.
 - **In-place state changes** — after connecting you stay on the panel; the button turns into **Open new chat** so you decide when to move.
-- **Prompt auto-copied** — the review prompt lands in your system clipboard on connect, ready to paste into any chat or editor, without occupying the input box.
-- **IPv4 / IPv6 / dual-stack display** — addresses resolved and shown once saved.
+- **Prompt auto-copied** — the task prompt lands in your system clipboard on connect, ready to paste into any chat or editor, without occupying the input box.
+- **Remote file browser** — a second tab lists, previews (text / image / hex) and downloads files on the connected host. It uses a separate `ssh` exec channel, so browsing never types into your terminal.
+- **IPv4 / IPv6 / dual-stack display** — addresses resolved and shown once saved, masked by default behind an eye toggle.
 - **Host-key policies** — trust-on-first-use (TOFU) or strict verification against `known_hosts`.
 
 ## Installation
@@ -82,7 +83,9 @@ Disable or remove the plugin under **Settings → Plugins**.
 - Credential records are bound to `host + port + username + authMode`. Another local program calling the connect endpoint cannot redirect a stored password to a different **literal** target; DNS changes and first-connection host keys still require your own verification.
 - Connections use an empty SSH config (`-F NUL` / `/dev/null`) and disable `ProxyCommand`, `ProxyJump`, `LocalCommand`, and `RemoteCommand`, so `~/.ssh/config` cannot rewrite the real target or run extra commands at connect time.
 - Private keys are read only by the local `ssh` process via `-i`. The plugin does not decrypt, copy, or upload them. The key path is passed through a terminal environment variable and does not appear in echoed commands, though OpenSSH debug output or terminal history may still contain it. Key **contents** are never sent to the model.
-- The directory-listing endpoint returns only name, path, size, and a "looks like a key" flag — **never file contents**. It requires an absolute path and rejects newline and null-byte injection.
+- The key-file listing endpoint returns only name, path, size, and a "looks like a key" flag — **never file contents**. The remote file endpoints (`fs-list` / `fs-preview` / `fs-download`) do return remote content to the local panel, but only for an absolute path on a host whose saved credential you already own; they are reachable only from the trusted DSH page (loopback plus Origin / `Sec-Fetch-Site` checks) and never hand content to the model. All paths reject newline and null-byte injection and are single-quote escaped before reaching the remote shell.
+- The remote file channel honours your host-key policy: **strict** mode passes `StrictHostKeyChecking=yes`, so an unknown host key fails instead of being silently accepted.
+- The file channel spawns a resolved absolute `ssh` binary with `shell: false`, so a planted `ssh.exe` in the current directory cannot hijack it.
 - Every remote command executed through the plugin requires confirmation in the UI. Each confirmation authorizes exactly one command.
 - **The plugin cannot restrict other local tools in the chat.** If the chat also has local execution tools, the model may still attempt local commands. On connect, the plugin tries to install a tool guard allowing only `ssh_terminal_read`, `ssh_terminal_run`, web lookup, `skill`, and user confirmation; if the host version lacks support, only the prompt constrains the model. Key-file read permissions remain governed by your DSH permission mode and OS user.
 - Trust-on-first-use cannot verify a server before the first connection; strict mode requires a correct `known_hosts` entry or the connection fails.

@@ -1,7 +1,7 @@
 {
   "name": "@laivikto/dsh-ssh-servers",
-  "version": "1.0.0",
-  "description": "SSH server manager for DeepSeek Harness: saved key/password connections, native key-file picker, live connection health, IPv4/IPv6 display, and a new chat prefilled with a read-only review prompt.",
+  "version": "1.2.0",
+  "description": "SSH server manager for DeepSeek Harness: saved key/password connections, native key-file picker, live connection health, IPv4/IPv6 display, a task prompt copied to the clipboard, and remote file browsing.",
   "type": "module",
   "main": "index.js",
   "license": "MIT",

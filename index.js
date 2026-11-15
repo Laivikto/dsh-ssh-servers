@@ -8,6 +8,7 @@
  * - 密码/口令只写入 PTY，不进入 Session 日志、聊天文本或工具结果。
  */
 import { existsSync, statSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { readdir as readdirAsync } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -824,6 +825,614 @@ async function deleteCredentialHandler(ctx, req, res) {
  * 请求：{ hostId: string }
  * 响应：{ ok: true, connected: boolean, alive: boolean, reason, terminalState? }
  */
+/**
+ * 远程文件浏览 API
+ *
+ * POST /ssh-servers/api/fs-list   列出目录
+ * POST /ssh-servers/api/fs-download  下载文件（返回 base64，限制大小）
+ *
+ * 设计要点：
+ * - 复用已建立的 SSH 连接（connections Map），不新开连接
+ * - 通过 runAndCapture 在远端执行 POSIX 命令
+ * - 路径经过严格校验，拒绝换行/空字节/超出根目录的遍历
+ * - 下载限制单文件大小，避免把大文件塞进 JSON
+ */
+
+/**
+ * 独立 SSH 执行通道（走系统 ssh 单命令模式，不占用终端）
+ */
+
+
+/**
+ * 用系统 ssh 执行一条远端命令，返回 stdout。
+ * 独立进程，不触碰任何 DSH 终端。
+ */
+/**
+ * 解析 ssh 可执行文件的绝对路径。
+ *
+ * 直接 spawn('ssh') 时，Windows 的 CreateProcess 会在 cwd 中优先查找，
+ * 若工作目录里被放了伪装的 ssh.exe 就会被执行并拿到私钥路径。
+ */
+const SSH_BIN = (() => {
+  const candidates = process.platform === 'win32'
+    ? [
+      join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe'),
+      join(process.env.ProgramFiles ?? 'C:\\Program Files', 'OpenSSH', 'ssh.exe'),
+    ]
+    : ['/usr/bin/ssh', '/bin/ssh', '/usr/local/bin/ssh']
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate
+    } catch { /* 继续尝试下一个 */ }
+  }
+  return 'ssh'
+})()
+
+function execRemote(target, command, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000
+  const maxBytes = options.maxBytes ?? 4 * 1024 * 1024
+
+  return new Promise((resolve, reject) => {
+    const args = ['-F', process.platform === 'win32' ? 'NUL' : '/dev/null']
+    args.push('-p', String(target.port))
+    args.push('-l', String(target.username))
+    args.push('-o', 'ConnectTimeout=10')
+    args.push('-o', 'ServerAliveInterval=15')
+    args.push('-o', 'ServerAliveCountMax=2')
+    // 尊重用户选择的主机密钥策略；严格模式下未知主机必须拒绝
+    args.push('-o', `StrictHostKeyChecking=${target.hostKeyPolicy === 'strict' ? 'yes' : 'accept-new'}`)
+    args.push('-o', 'BatchMode=yes')
+    args.push('-T')
+    args.push('-o', 'ProxyCommand=none')
+    args.push('-o', 'ProxyJump=none')
+    args.push('-o', 'PermitLocalCommand=no')
+    args.push('-o', 'PreferredAuthentications=publickey')
+    args.push('-o', 'IdentitiesOnly=yes')
+
+    if (target.keyPath) args.push('-i', target.keyPath)
+    args.push(target.host)
+    args.push(command)
+
+    let child
+    try {
+      child = spawn(SSH_BIN, args, {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // 固定工作目录，避免相对路径解析受调用方 cwd 影响
+        cwd: homedir(),
+      })
+    } catch (error) {
+      reject(error)
+      return
+    }
+
+    const outChunks = []
+    const errChunks = []
+    let outSize = 0
+    let settled = false
+    // 先声明再使用：finish 可能在任何时刻被调用，避免暂时性死区。
+    let timer = null
+
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      if (timer !== null) clearTimeout(timer)
+      try { child.kill() } catch { /* 已退出 */ }
+      fn(value)
+    }
+
+    timer = setTimeout(() => {
+      // SIGTERM 可能被忽略（例如卡在内核 IO），先温和再强制
+      try { child.kill('SIGTERM') } catch { /* 已退出 */ }
+      setTimeout(() => { try { child.kill('SIGKILL') } catch { /* 已退出 */ } }, 1000).unref?.()
+      finish(reject, new Error(`远端命令超时（${Math.round(timeoutMs / 1000)} 秒）。`))
+    }, timeoutMs)
+    timer.unref?.()
+
+    child.stdout.on('data', (chunk) => {
+      if (settled) return
+      outSize += chunk.length
+      if (outSize > maxBytes) {
+        finish(reject, new Error('远端输出超过上限。'))
+        return
+      }
+      outChunks.push(chunk)
+    })
+    child.stderr.on('data', (chunk) => {
+      if (settled) return
+      if (errChunks.length < 32) errChunks.push(chunk)
+    })
+    child.on('error', (error) => finish(reject, error))
+    child.on('close', (code) => {
+      if (settled) return
+      const stdout = Buffer.concat(outChunks).toString('utf8')
+      if (code === 0) {
+        finish(resolve, stdout)
+        return
+      }
+      const stderr = Buffer.concat(errChunks).toString('utf8').trim()
+      finish(reject, new Error(stderr || `ssh 退出码 ${code}`))
+    })
+  })
+}
+
+/** 从凭据记录构造执行目标；缺关键字段返回 undefined。 */
+function buildExecTarget(record) {
+  if (record === null || typeof record !== 'object') return undefined
+  const host = normalizeHost(record.host)
+  const port = normalizePort(record.port)
+  const username = typeof record.username === 'string' ? record.username.trim() : ''
+  if (host === undefined || port === undefined || username === '') return undefined
+  if (!USER_PATTERN.test(username)) return undefined
+
+  const target = {
+    host,
+    port,
+    username,
+    hostKeyPolicy: record.hostKeyPolicy === 'strict' ? 'strict' : 'accept-new',
+  }
+  if (record.authMode === 'key') {
+    const keyPath = normalizeKeyPath(record.keyPath)
+    if (keyPath === undefined) return undefined
+    // existsSync 与 statSync 之间存在竞态，任一抛错都当作不可用
+    try {
+      if (!existsSync(keyPath) || !statSync(keyPath).isFile()) return undefined
+    } catch {
+      return undefined
+    }
+    target.keyPath = keyPath
+  } else {
+    // 密码认证无法在 BatchMode 下工作，明确拒绝
+    return undefined
+  }
+  return target
+}
+
+
+/** 数据区起止标记：runAndCapture 返回整块屏幕，靠标记定位真正的数据。 */
+const FS_BEGIN = '__DSH_FS_BEGIN__'
+const FS_END = '__DSH_FS_END__'
+
+/**
+ * 抽取 begin 与 end 标记之间的行。
+ * 找不到 begin 时返回 null（表示命令可能未执行或输出被截断）。
+ */
+function extractMarkedLines(text, begin, end) {
+  const raw = String(text ?? '')
+  const b = raw.indexOf(begin)
+  if (b < 0) return null
+  const afterB = raw.slice(b + begin.length)
+  const e = afterB.indexOf(end)
+  const body = e >= 0 ? afterB.slice(0, e) : afterB
+  return body.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l !== '')
+}
+
+/** 单次列出的最大条目数。 */
+const FS_MAX_ENTRIES = 500
+/** 允许下载的最大文件字节数。 */
+const FS_MAX_DOWNLOAD = 8 * 1024 * 1024
+
+/** 校验并规范化远端路径。必须是绝对路径，且不含控制字符。 */
+function normalizeRemotePath(value) {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (trimmed === '' || trimmed.length > 4096) return undefined
+  if (/[\0\r\n]/.test(trimmed)) return undefined
+  if (!trimmed.startsWith('/')) return undefined
+  // 折叠重复斜杠，去掉结尾斜杠（根目录除外）
+  const collapsed = trimmed.replace(/\/{2,}/g, '/')
+  if (collapsed === '/') return '/'
+  return collapsed.replace(/\/+$/, '') || '/'
+}
+
+/** 按连接找一台当前可用的 SSH 会话。 */
+function findConnectionByHostId(hostId) {
+  for (const connection of connections.values()) {
+    if (connection.hostId !== hostId) continue
+    if (connection.terminal?.info?.state === 'running' || connection.terminal?.info?.state === undefined) {
+      return connection
+    }
+  }
+  return undefined
+}
+
+/**
+ * 列出远端目录。
+ * 用 `ls -la --time-style=+%s` 拿秒级时间戳，再配合 find 判断类型。
+ * 为避免解析歧义，改用 `find -maxdepth 1 -printf` 输出结构化字段。
+ */
+async function fsListHandler(ctx, req, res) {
+  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
+  if (!guard(ctx, req, res)) return
+  let body
+  try {
+    body = await readJson(req)
+  } catch {
+    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
+  }
+  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+
+  const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
+  if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
+
+  const dir = normalizeRemotePath(body.path ?? '/')
+  if (dir === undefined) return writeJson(res, 400, { ok: false, code: 'invalid-path', message: '目录路径无效。' })
+
+  // 解析执行目标：优先用保存的凭据（不依赖终端是否已连接）
+  let record
+  try {
+    record = await readRecord(ctx, hostId)
+  } catch {
+    return writeJson(res, 500, { ok: false, code: 'credential-read-failed', message: '读取本机凭据失败。' })
+  }
+  if (record === undefined) {
+    return writeJson(res, 409, { ok: false, code: 'no-credential', message: '该主机还没有保存连接凭据。' })
+  }
+  const target = buildExecTarget(record)
+  if (target === undefined) {
+    return writeJson(res, 409, {
+      ok: false,
+      code: 'credential-incomplete',
+      message: record.authMode === 'password'
+        ? '密码认证暂不支持后台浏览，请改用密钥或保持终端连接。'
+        : '凭据不完整或私钥不可读。',
+    })
+  }
+
+  try {
+    // 走独立 exec 通道：不写终端、不产生回显
+    // 两端打标记：execRemote 返回的是纯 stdout，但标记能可靠区分「空目录」与「命令未执行」
+    const gnuCmd = `echo ${FS_BEGIN}; find ${posixQuote(dir)} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%T@\\t%m\\t%f\\n' 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+    let entries = null
+    try {
+      const raw = await execRemote(target, gnuCmd, { timeoutMs: 20_000 })
+      entries = parseFindOutput(raw)
+    } catch {
+      entries = null
+    }
+
+    // 回退：find 不支持 -printf 时用 ls
+    if (entries === null) {
+      const lsCmd = `echo ${FS_BEGIN}; ls -la --time-style=+%s ${posixQuote(dir)} 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+      const raw = await execRemote(target, lsCmd, { timeoutMs: 20_000 })
+      entries = parseLsOutput(raw)
+    }
+
+    if (entries === null) {
+      return writeJson(res, 500, { ok: false, code: 'list-failed', message: '无法解析目录列表。' })
+    }
+
+    return writeJson(res, 200, {
+      ok: true,
+      path: dir,
+      parent: dir === '/' ? null : dir.replace(/\/[^/]+$/, '') || '/',
+      entries,
+    })
+  } catch (error) {
+    return writeJson(res, 500, {
+      ok: false,
+      code: 'list-failed',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/**
+ * 解析 GNU find -printf 输出：type\tsize\tmtime\tmode\tname
+ * 返回 null 表示格式不符（可能命令不可用）。
+ */
+function parseFindOutput(text) {
+  const lines = extractMarkedLines(text, FS_BEGIN, FS_END)
+  if (lines === null) return null
+  if (lines.length === 0) return []
+  const out = []
+  for (const line of lines) {
+    const parts = line.split('\t')
+    if (parts.length < 5) continue
+    const [type, size, mtime, mode, ...nameParts] = parts
+    const name = nameParts.join('\t')
+    if (!/^[bcdpflsD-]$/.test(type.trim())) continue
+    if (name === '.' || name === '..') continue
+    out.push({
+      name,
+      type: typeToKind(type.trim()),
+      size: Number(size) || 0,
+      mtimeMs: Math.round((Number(mtime) || 0) * 1000),
+      mode: mode.trim(),
+    })
+  }
+  return out
+}
+
+/** 解析 ls -la --time-style=+%s 输出。 */
+function parseLsOutput(text) {
+  const marked = extractMarkedLines(text, FS_BEGIN, FS_END)
+  const lines = marked !== null ? marked : String(text ?? '').split('\n')
+  const out = []
+  for (const line of lines) {
+    const trimmed = line.trimEnd()
+    if (trimmed === '') continue
+    if (/^total\b/.test(trimmed)) continue
+    // 过滤命令回显与提示符残留
+    if (/^[a-z]:\\/i.test(trimmed)) continue
+    if (/^(?:\$|>|root@|\^C|<)/.test(trimmed)) continue
+    if (/2>\/dev\/null|--time-style/.test(trimmed)) continue
+    const m = trimmed.match(/^([-dlcbps])([rwxsStT-]{9})[.+?]?\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s+(.*)$/)
+    if (!m) continue
+    const name = m[5].trim()
+    if (name === '.' || name === '..') continue
+    // ls 只在符号链接行追加 "-> target"；普通文件名里的箭头必须原样保留
+    const kind = m[1] === 'd' ? 'dir' : m[1] === 'l' ? 'link' : 'file'
+    out.push({
+      name: kind === 'link' ? name.replace(/\s+->\s+.*$/, '') : name,
+      type: kind,
+      size: Number(m[3]) || 0,
+      mtimeMs: Number(m[4]) * 1000,
+      mode: `${m[1]}${m[2]}`,
+    })
+  }
+  // 有标记说明命令确实执行过：空结果就是空目录，不能当成解析失败。
+  if (marked !== null) return out
+  return out.length > 0 ? out : null
+}
+
+/** find 的 type 字符转成界面用的种类。 */
+function typeToKind(ch) {
+  if (ch === 'd') return 'dir'
+  if (ch === 'l') return 'link'
+  // find -printf %y 对普通文件输出 'f'，ls 输出 '-'
+  if (ch === '-' || ch === 'f') return 'file'
+  return 'other'
+}
+
+/**
+ * 下载单个文件：返回 base64 内容。
+ * 出于安全与体积考虑，超过 FS_MAX_DOWNLOAD 的文件会被拒绝。
+ */
+/**
+ * 远端文件预览 API
+ *
+ * POST /ssh-servers/api/fs-preview
+ * 读取远端文件内容用于在面板内直接显示：
+ * - 文本文件返回 utf8 文本
+ * - 二进制返回十六进制视图
+ * - 图片返回 base64（供 <img> 直接显示）
+ *
+ * 限制：单次最多读取 FS_PREVIEW_MAX 字节，超出截断并标记 truncated。
+ */
+
+/** 单次预览读取上限。 */
+const FS_PREVIEW_MAX = 1024 * 1024
+
+/** 可原地渲染的图片扩展名。 */
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg)$/iu
+
+/** 判断字节序列是否像文本（无 NUL，控制字符占比低）。 */
+function looksTextual(bytes) {
+  if (bytes.length === 0) return true
+  const sample = bytes.subarray(0, Math.min(bytes.length, 8192))
+  let control = 0
+  for (let i = 0; i < sample.length; i++) {
+    const b = sample[i]
+    if (b === 0) return false
+    // 允许 \t \n \r，其余 C0 控制字符计入
+    if (b < 9 || (b > 13 && b < 32)) control++
+  }
+  return control / sample.length < 0.02
+}
+
+/** 生成十六进制 + ASCII 视图。 */
+function hexView(bytes, maxBytes = 65536) {
+  const slice = bytes.subarray(0, maxBytes)
+  const lines = []
+  for (let i = 0; i < slice.length; i += 16) {
+    const chunk = slice.subarray(i, i + 16)
+    const hex = [...chunk].map((b) => b.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ')
+    const ascii = [...chunk].map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('')
+    lines.push(`${i.toString(16).padStart(8, '0')}  ${hex}  |${ascii}|`)
+  }
+  return lines.join('\n')
+}
+
+async function fsPreviewHandler(ctx, req, res) {
+  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
+  if (!guard(ctx, req, res)) return
+  let body
+  try {
+    body = await readJson(req)
+  } catch {
+    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
+  }
+  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+
+  const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
+  if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
+
+  const filePath = normalizeRemotePath(body.path)
+  if (filePath === undefined || filePath === '/') {
+    return writeJson(res, 400, { ok: false, code: 'invalid-path', message: '文件路径无效。' })
+  }
+
+  let record
+  try {
+    record = await readRecord(ctx, hostId)
+  } catch {
+    return writeJson(res, 500, { ok: false, code: 'credential-read-failed', message: '读取本机凭据失败。' })
+  }
+  if (record === undefined) {
+    return writeJson(res, 409, { ok: false, code: 'no-credential', message: '该主机还没有保存连接凭据。' })
+  }
+  const target = buildExecTarget(record)
+  if (target === undefined) {
+    return writeJson(res, 409, { ok: false, code: 'credential-incomplete', message: '凭据不完整或私钥不可读。' })
+  }
+
+  try {
+    // 先看大小，决定读取策略
+    // 优先 GNU stat；BusyBox/BSD 上 -c 不可用时退回 wc -c，避免把存在的文件误报为不存在。
+    const quoted = posixQuote(filePath)
+    const statCmd =
+      `v=$(stat -c '%s %a' ${quoted} 2>/dev/null); ` +
+      `if [ -n "$v" ]; then echo "$v"; ` +
+      `else n=$(wc -c < ${quoted} 2>/dev/null || echo -1); echo "$n -"; fi`
+    const statRaw = await execRemote(target, statCmd, { timeoutMs: 15_000 })
+    const statLine = String(statRaw).trim().split('\n').pop() ?? '-1 -'
+    const [sizeText, mode] = statLine.split(' ')
+    const size = Number(sizeText)
+    if (!Number.isFinite(size) || size < 0) {
+      return writeJson(res, 404, { ok: false, code: 'not-found', message: '文件不存在或无法读取。' })
+    }
+
+    const readLimit = Math.min(size, FS_PREVIEW_MAX)
+    const truncated = size > FS_PREVIEW_MAX
+
+    // 用 base64 传输，避免二进制/编码破坏
+    // tr -d '\n' 兼容 GNU/BSD/busybox，base64 -w0 只有 GNU 支持
+    const b64Cmd = `head -c ${readLimit} ${posixQuote(filePath)} 2>/dev/null | base64 2>/dev/null | tr -d '\\n'`
+    const b64Raw = String(await execRemote(target, b64Cmd, { timeoutMs: 30_000 }) ?? '')
+    const cleaned = b64Raw.replace(/[^A-Za-z0-9+/=]/g, '')
+    if (cleaned === '' && size > 0) {
+      return writeJson(res, 500, { ok: false, code: 'read-failed', message: '读取文件内容失败。' })
+    }
+
+    const buffer = Buffer.from(cleaned, 'base64')
+    const name = filePath.split('/').pop() ?? 'file'
+    const isImage = IMAGE_EXT.test(name)
+
+    // 图片直接给 base64，前端用 <img> 渲染
+    if (isImage) {
+      const mime = /\.png$/iu.test(name) ? 'image/png'
+        : /\.jpe?g$/iu.test(name) ? 'image/jpeg'
+        : /\.gif$/iu.test(name) ? 'image/gif'
+        : /\.webp$/iu.test(name) ? 'image/webp'
+        : /\.bmp$/iu.test(name) ? 'image/bmp'
+        : /\.ico$/iu.test(name) ? 'image/x-icon'
+        : /\.svg$/iu.test(name) ? 'image/svg+xml'
+        : 'application/octet-stream'
+      return writeJson(res, 200, {
+        ok: true, path: filePath, name, size, mode: mode ?? '',
+        kind: 'image', mime, base64: buffer.toString('base64'), truncated,
+      })
+    }
+
+    // 文本 vs 二进制
+    if (looksTextual(buffer)) {
+      return writeJson(res, 200, {
+        ok: true, path: filePath, name, size, mode: mode ?? '',
+        kind: 'text', text: buffer.toString('utf8'), truncated,
+      })
+    }
+
+    // hexView 只渲染前 64 KB；若缓冲区更大，同样要标记为已截断，
+    // 否则界面会误称"完整显示"。
+    const hexLimit = 65536
+    return writeJson(res, 200, {
+      ok: true, path: filePath, name, size, mode: mode ?? '',
+      kind: 'binary', hex: hexView(buffer, hexLimit),
+      truncated: truncated || buffer.length > hexLimit,
+    })
+  } catch (error) {
+    return writeJson(res, 500, {
+      ok: false,
+      code: 'preview-failed',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+async function fsDownloadHandler(ctx, req, res) {
+  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
+  if (!guard(ctx, req, res)) return
+  let body
+  try {
+    body = await readJson(req)
+  } catch {
+    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
+  }
+  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+
+  const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
+  if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
+
+  const filePath = normalizeRemotePath(body.path)
+  if (filePath === undefined || filePath === '/') {
+    return writeJson(res, 400, { ok: false, code: 'invalid-path', message: '文件路径无效。' })
+  }
+
+  // 与 fs-list / fs-preview 一致：优先用保存的凭据建立独立执行通道，
+  // 不要求终端处于连接状态（避免下载功能依赖终端存活）。
+  let record
+  try {
+    record = await readRecord(ctx, hostId)
+  } catch {
+    return writeJson(res, 500, { ok: false, code: 'credential-read-failed', message: '读取本机凭据失败。' })
+  }
+  if (record === undefined) {
+    return writeJson(res, 409, { ok: false, code: 'no-credential', message: '该主机还没有保存连接凭据。' })
+  }
+  const target = buildExecTarget(record)
+  if (target === undefined) {
+    return writeJson(res, 409, { ok: false, code: 'credential-incomplete', message: '凭据不完整或私钥不可读。' })
+  }
+
+  try {
+    // 先查大小，避免把超大文件读进内存
+    // 与 preview 一致：GNU stat 不可用时退回 wc -c
+    const sizeCmd = `v=$(stat -c %s ${posixQuote(filePath)} 2>/dev/null); ` +
+      `if [ -n "$v" ]; then echo "$v"; else wc -c < ${posixQuote(filePath)} 2>/dev/null || echo -1; fi`
+    const sizeRaw = await execRemote(target, sizeCmd, { timeoutMs: 20_000 })
+    const size = Number(String(sizeRaw).trim().split('\n').pop())
+    if (!Number.isFinite(size) || size < 0) {
+      return writeJson(res, 404, { ok: false, code: 'not-found', message: '文件不存在或无法读取。' })
+    }
+    if (size > FS_MAX_DOWNLOAD) {
+      return writeJson(res, 413, {
+        ok: false,
+        code: 'too-large',
+        message: `文件 ${(size / 1024 / 1024).toFixed(1)} MB，超过 ${FS_MAX_DOWNLOAD / 1024 / 1024} MB 上限。`,
+        size,
+      })
+    }
+
+    const b64Cmd = `base64 ${posixQuote(filePath)} 2>/dev/null | tr -d '\\n' | head -c ${Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 1024}`
+    // base64 后体积约为原文的 4/3，必须显式抬高通道上限，
+    // 否则超过约 3 MB 的文件会被 execRemote 的默认 4 MB 上限拒绝。
+    const b64Raw = await execRemote(target, b64Cmd, {
+      timeoutMs: 60_000,
+      maxBytes: Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 64 * 1024,
+    })
+    const cleaned = String(b64Raw ?? '').replace(/[^A-Za-z0-9+/=]/g, '')
+    // 0 字节文件的 base64 本就是空串，不能当失败
+    if (cleaned === '' && size > 0) {
+      return writeJson(res, 500, { ok: false, code: 'read-failed', message: '读取文件内容失败。' })
+    }
+
+    // 校验解出的字节数：文件在 stat 与读取之间被改写时长度会不符
+    const decodedLength = Buffer.from(cleaned, 'base64').length
+    if (size <= FS_MAX_DOWNLOAD && decodedLength !== size) {
+      return writeJson(res, 500, {
+        ok: false,
+        code: 'size-mismatch',
+        message: `读取到 ${decodedLength} 字节，与预期的 ${size} 字节不一致（文件可能正在被修改）。`,
+      })
+    }
+
+    return writeJson(res, 200, {
+      ok: true,
+      path: filePath,
+      size,
+      base64: cleaned,
+      name: filePath.split('/').pop() ?? 'download',
+    })
+  } catch (error) {
+    return writeJson(res, 500, {
+      ok: false,
+      code: 'download-failed',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 async function connectionStateHandler(ctx, req, res) {
   if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
   if (!guard(ctx, req, res)) return
@@ -1136,6 +1745,9 @@ export function apply(ctx) {
     { path: `${API_ROOT}/resolve`, handler: (req, res) => resolveHandler(ctx, req, res) },
     { path: `${API_ROOT}/list-keys`, handler: (req, res) => listKeysHandler(ctx, req, res) },
     { path: `${API_ROOT}/connection-state`, handler: (req, res) => connectionStateHandler(ctx, req, res) },
+    { path: `${API_ROOT}/fs-list`, handler: (req, res) => fsListHandler(ctx, req, res) },
+    { path: `${API_ROOT}/fs-download`, handler: (req, res) => fsDownloadHandler(ctx, req, res) },
+    { path: `${API_ROOT}/fs-preview`, handler: (req, res) => fsPreviewHandler(ctx, req, res) },
   ]
   for (const route of routes) {
     ctx.effect(() => ctx.webServer.register({
@@ -1191,4 +1803,11 @@ export const __test__ = {
   sortKeyCandidates,
   looksDisconnected,
   mapConnectionState,
+  normalizeRemotePath,
+  parseFindOutput,
+  parseLsOutput,
+  typeToKind,
+  looksTextual,
+  hexView,
+  extractMarkedLines,
 }
