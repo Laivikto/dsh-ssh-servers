@@ -18,9 +18,33 @@ English | [简体中文](./README.zh.md)
 
 ## Installation
 
-This is a local DSH bundle. Install it as follows.
+### Option 1: npm (recommended)
 
-### Option 1: Download from GitHub (recommended)
+The plugin is published on npm, so installing and updating needs no archive and no manual file copying.
+
+In DSH Desktop open **Settings → Plugins → Add plugin** and enter the package name:
+
+```
+@laivikto/dsh-ssh-servers
+```
+
+The plugin manager installs it into your profile and registers its bundle. Restart DSH and an **SSH Cloud Servers** tab appears in the right sidebar. To update later, use the same add/update action in the plugin manager.
+
+Or wire it into the profile by hand:
+
+```json
+{
+  "dependencies": {
+    "@laivikto/dsh-ssh-servers": "^1.2.0"
+  }
+}
+```
+
+Also add `"@laivikto/dsh-ssh-servers"` to `dsh.profile.bundles`, then restart DSH.
+
+> Do not run `pnpm` manually or edit `cordis.patch.yml` — DSH's plugin manager handles those steps.
+
+### Option 2: Download from GitHub
 
 1. Download the archive:
    <https://github.com/Laivikto/dsh-ssh-servers/archive/refs/heads/main.zip>
@@ -30,7 +54,7 @@ This is a local DSH bundle. Install it as follows.
 4. Select the extracted directory
 5. Restart DSH; an **SSH Cloud Servers** tab appears in the right sidebar
 
-### Option 2: Local development link
+### Option 3: Local development link
 
 Point the profile at the repository:
 
@@ -43,14 +67,6 @@ Point the profile at the repository:
 ```
 
 Also add `"@laivikto/dsh-ssh-servers"` to `dsh.profile.bundles`, then restart DSH.
-
-> Do not run `pnpm` manually or edit `cordis.patch.yml` — DSH's plugin manager handles those steps.
-
-### Option 3: npm (future)
-
-```bash
-npm install @laivikto/dsh-ssh-servers
-```
 
 ### Uninstall
 

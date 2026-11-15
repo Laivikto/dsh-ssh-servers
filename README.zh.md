@@ -18,9 +18,33 @@
 
 ## 安装
 
-本插件是 DSH 的本地 bundle，安装方式如下。
+### 方式一：npm（推荐）
 
-### 方式一：从 GitHub 下载（推荐）
+插件已发布到 npm，安装和更新都不需要下载压缩包，也不用手动拷贝文件。
+
+打开 DSH Desktop，进入 **设置 → 插件 → 添加插件**，输入包名：
+
+```
+@laivikto/dsh-ssh-servers
+```
+
+插件管理器会把它装进 profile 并注册好 bundle。重启 DSH，右侧栏就会出现「SSH 云服务器」标签。以后升级也走同一个添加 / 更新入口，不用再碰文件。
+
+也可以在 profile 里手动声明：
+
+```json
+{
+  "dependencies": {
+    "@laivikto/dsh-ssh-servers": "^1.2.0"
+  }
+}
+```
+
+并在 `dsh.profile.bundles` 列表中加入 `"@laivikto/dsh-ssh-servers"`，然后重启 DSH。
+
+> 不要手动跑 `pnpm` 或直接改 `cordis.patch.yml`；DSH 的插件管理器会负责这些步骤。
+
+### 方式二：从 GitHub 下载
 
 1. 下载仓库压缩包：
    <https://github.com/Laivikto/dsh-ssh-servers/archive/refs/heads/main.zip>
@@ -30,7 +54,7 @@
 4. 选择上一步解压出来的目录
 5. 重启 DSH，右侧栏会出现「SSH 云服务器」标签
 
-### 方式二：开发者本地联调
+### 方式三：开发者本地联调
 
 把仓库目录直接链接进 profile：
 
@@ -42,15 +66,6 @@
 ```
 
 并在 `dsh.profile.bundles` 列表中加入 `"@laivikto/dsh-ssh-servers"`，然后重启 DSH。
-
-> 不要手动跑 `pnpm` 或直接改 `cordis.patch.yml`；DSH 的插件管理器会负责这些步骤。
-
-### 方式三：npm（未来）
-
-```bash
-# 发布后可用
-npm install @laivikto/dsh-ssh-servers
-```
 
 ### 卸载
 

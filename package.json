@@ -6,6 +6,9 @@
   "main": "index.js",
   "license": "MIT",
   "author": "Laivikto",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
