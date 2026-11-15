@@ -3,6 +3,15 @@
 本项目的所有重要变更都记录在此文件。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.2] - 2026-11-15
+
+仅文档变更。
+
+### 变更
+
+- README（中文与英文）的安装章节收敛为 npm 两种方式：**DSH Desktop 图形界面**与**命令行 `dsh plugin add`**。
+- 移除「GitHub 压缩包下载」与「本地 `link:` 联调」两种安装方式。
+
 ## [1.2.1] - 2026-11-15
 
 仅文档与发布配置变更，无功能改动。
