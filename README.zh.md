@@ -17,15 +17,43 @@
 
 ## 安装
 
-```bash
-# 作为本地插件目录安装（开发模式）
-dsh plugin install link:"E:/dsh file/ssh-servers-plugin"
+本插件是 DSH 的本地 bundle，安装方式如下。
 
-# 或从 npm 安装（发布后）
+### 方式一：从 GitHub 下载（推荐）
+
+1. 下载仓库压缩包：
+   <https://github.com/Laivikto/dsh-ssh-servers/archive/refs/heads/main.zip>
+   （也可以直接 `git clone`）
+2. 解压到任意目录，例如 `D:\plugins\dsh-ssh-servers`
+3. 打开 DSH Desktop，进入 **设置 → 插件**（Plugins），点击 **添加插件 / Add plugin**
+4. 选择上一步解压出来的目录
+5. 重启 DSH，右侧栏会出现「SSH 云服务器」标签
+
+### 方式二：开发者本地联调
+
+把仓库目录直接链接进 profile：
+
+```bash
+# profile 的 package.json 里声明
+"dependencies": {
+  "@laivikto/dsh-ssh-servers": "link:E:/path/to/dsh-ssh-servers"
+}
+```
+
+并在 `dsh.profile.bundles` 列表中加入 `"@laivikto/dsh-ssh-servers"`，然后重启 DSH。
+
+> 不要手动跑 `pnpm` 或直接改 `cordis.patch.yml`；DSH 的插件管理器会负责这些步骤。
+
+### 方式三：npm（未来）
+
+```bash
+# 发布后可用
 npm install @laivikto/dsh-ssh-servers
 ```
 
-也可在 DSH 的插件管理界面中启用。
+### 卸载
+
+在 **设置 → 插件** 中禁用或移除该插件即可。
 
 ## 使用
 
