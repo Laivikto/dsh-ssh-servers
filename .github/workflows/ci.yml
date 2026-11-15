@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.x', '24.x']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Run tests
+        run: npm test
+
+  lint-package:
+    name: Validate package manifest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Check required files
+        run: |
+          for f in index.js client.js package.json LICENSE README.md cordis.patch.yml; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少必需文件: $f"
+              exit 1
+            fi
+          done
+          echo "必需文件齐全"
+
+      - name: Check for committed secrets
+        run: |
+          if git ls-files | grep -E '\.(pem|key|ppk)$|^id_(rsa|ed25519)$'; then
+            echo "::error::检测到私钥类文件被提交，请移除"
+            exit 1
+          fi
+          echo "未检测到私钥文件"
+
+      - name: Validate JSON files
+        run: |
+          for f in package.json locale/zh.json locale/en.json; do
+            node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" || {
+              echo "::error::JSON 无效: $f"
+              exit 1
+            }
+          done
+          echo "JSON 全部有效"

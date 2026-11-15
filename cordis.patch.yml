@@ -1,0 +1,3 @@
+- insert:
+    - id: ssh-servers
+      name: '@laivikto/dsh-ssh-servers'
