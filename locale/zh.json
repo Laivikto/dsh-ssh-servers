@@ -112,5 +112,8 @@
   "authHint": "两种凭据可同时保存，连接时选择用哪个。",
   "fsPreviewLoading": "读取中…",
   "fsPreviewClose": "关闭",
-  "fsPreviewTruncated": "文件较大，仅显示前 1 MB"
+  "fsPreviewTruncated": "文件较大，仅显示前 1 MB",
+  "fsExpand": "展开文件浏览",
+  "fsCollapse": "收起文件浏览",
+  "fsConnectedBadge": "已连接"
 }

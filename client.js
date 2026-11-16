@@ -304,6 +304,16 @@ window.__ModuleLoader__.load({
       .dsh-ssh-namecross{color:var(--dsw-alias-state-error-primary,#ef4444);font-weight:700;margin-right:2px}
       .dsh-ssh-chip-error{border-color:var(--dsw-alias-state-error-primary,#ef4444);color:var(--dsw-alias-state-error-primary,#ef4444)}
       .dsh-ssh-chip-idle{border-color:var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}
+      /* 卡片内就地展开的文件浏览区块 */
+      .dsh-ssh-fs-wrap{margin-top:8px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l1);display:flex;flex-direction:column;gap:8px;min-width:0}
+      .dsh-ssh-fs-toggle{display:flex;align-items:center;gap:6px;background:none;border:none;padding:2px 0;font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left;min-width:0}
+      .dsh-ssh-fs-toggle:hover{color:var(--dsw-alias-state-success-primary,#16a34a)}
+      .dsh-ssh-fs-caret{font-size:10px;color:var(--dsw-alias-label-secondary);flex:0 0 auto;width:10px}
+      .dsh-ssh-fs-badge{font-size:9.5px;font-weight:500;padding:1px 6px;border-radius:999px;border:1px solid var(--dsw-alias-state-success-primary,#16a34a);color:var(--dsw-alias-state-success-primary,#16a34a);flex:0 0 auto}
+      .dsh-fs-section{display:flex;flex-direction:column;gap:8px;min-width:0}
+      .dsh-fs-section-head{display:flex;align-items:flex-start;gap:8px;justify-content:space-between;min-width:0}
+      .dsh-fs-section-title{margin:0;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary)}
+      .dsh-fs-section-sub{margin:2px 0 0;font-size:10.5px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       .dsh-fs-pathbar{display:flex;align-items:center;gap:6px}
       .dsh-fs-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:7px;padding:5px 8px;font-size:11.5px;color:var(--dsw-alias-label-primary)}
       .dsh-fs-toolbar{display:flex;gap:6px;align-items:center}
@@ -618,6 +628,21 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           }
         }
 
+        /**
+         * 把 SSH 服务面板切到最前。
+         * openTab 只作用于「屏幕上挂载的会话」，所以调用时机很关键：
+         * 连接时新建的会话尚未挂载，此时调用会写到旧会话的侧栏上（用户看不到）。
+         * 因此这里延后到下一帧再试，并允许调用方重复尝试。
+         */
+        const revealPanel = (attempt = 0) => {
+          try {
+            ctx.sidebarRight.openTab(TAB_KIND)
+            return
+          } catch { /* 会话尚未挂载，稍后重试 */ }
+          if (attempt >= 6) return
+          setTimeout(() => revealPanel(attempt + 1), 120 * (attempt + 1))
+        }
+
         function HeaderButton() {
           const label = text(t, 'openPanel', '打开 SSH 服务')
           return h(React.Fragment, null,
@@ -679,11 +704,14 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       return '文件'
     }
 
-    /** 文件浏览器主面板。 */
-    function FileBrowserPanel(props) {
-      const { sessionId } = props
-      const tt = props.t ?? ((k, d) => d ?? k)
-      const [server, setServer] = React.useState(null)
+    /**
+     * 文件浏览区块。
+     * 由 HostsPanel 在「主机已连接」时内联渲染，不再作为独立标签页。
+     * 连接状态由 HostsPanel 的 30 秒心跳统一驱动（server 为 null 即未连接）。
+     */
+    function FileBrowserSection(props) {
+      const { server, tt: sectionT } = props
+      const tt = sectionT ?? ((k, d) => d ?? k)
       const [path, setPath] = React.useState('/')
       const [parent, setParent] = React.useState(null)
       const [entries, setEntries] = React.useState([])
@@ -705,40 +733,18 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       }, [])
       React.useEffect(() => () => { alive.current = false }, [])
 
-      // 从本地存储里找第一台已保存且已连接的主机
+      // 连接状态由 HostsPanel 的心跳统一提供（server 变化即代表连接/断开）。
+      // 换主机时回到根目录并清掉上一台的预览与筛选。
       React.useEffect(() => {
-        let cancelled = false
-        const pick = async () => {
-          const profiles = (() => {
-            try {
-              const raw = localStorage.getItem('dsh.ssh-servers.v1')
-              const arr = raw === null ? [] : JSON.parse(raw)
-              return Array.isArray(arr) ? arr.filter((x) => x && typeof x.id === 'string') : []
-            } catch { return [] }
-          })()
-          for (const profile of profiles) {
-            try {
-              const state = await api('connection-state', { hostId: profile.id })
-              if (state.alive === true) {
-                // 同一台主机复用原对象引用：否则 server 每轮都是新对象，
-                // load 会重建、自动进根目录的 effect 反复触发，把用户踢回 /。
-                if (!cancelled) {
-                  setServer((prev) => (prev !== null && prev.id === profile.id ? prev : profile))
-                }
-                return
-              }
-            } catch { /* 忽略单台失败 */ }
-          }
-          if (!cancelled) setServer((prev) => (prev === null ? prev : null))
-        }
-        void pick()
-        const timer = setInterval(() => {
-          // 窗口在后台时不必探测，省一次 SSH 往返
-          if (typeof document !== 'undefined' && document.hidden === true) return
-          void pick()
-        }, 15000)
-        return () => { cancelled = true; clearInterval(timer) }
-      }, [])
+        setPath('/')
+        setParent(null)
+        setEntries([])
+        setPreviewFile(null)
+        setFilter('')
+        setError('')
+        setNotice('')
+        previewSeq.current++
+      }, [server === null ? '' : server.id])
 
       const load = React.useCallback(async (targetPath) => {
         if (server === null) return
@@ -852,28 +858,14 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         return list
       }, [entries, filter, sortBy, sortAsc])
 
-      if (server === null) {
-        return h('div', { className: 'dsh-ssh-root' },
-          h('style', null, CSS),
-          h('div', { className: 'dsh-ssh-head' },
-            h('div', null,
-              h('h2', { className: 'dsh-ssh-title' }, text(tt, 'fsTitle', 'SSH 服务文件')),
-              h('p', { className: 'dsh-ssh-sub' }, text(tt, 'fsSub', '浏览已连接主机上的文件。')),
-            ),
-          ),
-          h('div', { className: 'dsh-ssh-empty' },
-            h('strong', null, text(tt, 'fsNoServer', '没有已连接的主机')),
-            h('span', null, text(tt, 'fsNoServerHint', '请先在「SSH 服务」标签页连接一台主机，再回到这里。')),
-          ),
-        )
-      }
+      // 未连接时内联区块整体不渲染（HostsPanel 只在已连接时挂载它）
+      if (server === null) return null
 
-      return h('div', { className: 'dsh-ssh-root' },
-        h('style', null, CSS),
-        h('div', { className: 'dsh-ssh-head' },
-          h('div', null,
-            h('h2', { className: 'dsh-ssh-title' }, text(tt, 'fsTitle', 'SSH 服务文件')),
-            h('p', { className: 'dsh-ssh-sub' }, server.name + ' · ' + server.username + '@' + server.host),
+      return h('div', { className: 'dsh-fs-section' },
+        h('div', { className: 'dsh-fs-section-head' },
+          h('div', { style: { minWidth: 0 } },
+            h('h3', { className: 'dsh-fs-section-title' }, text(tt, 'fsTitle', 'SSH 服务文件')),
+            h('p', { className: 'dsh-fs-section-sub' }, server.name + ' · ' + server.username + '@' + server.host),
           ),
           h('button', {
             type: 'button', className: 'dsh-ssh-btn', disabled: loading,
@@ -1021,6 +1013,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           const [pendingDelete, setPendingDelete] = useState(null)
           const [keyPick, setKeyPick] = useState({ open: false, loading: false, dir: '', files: [], error: '' })
           const [liveConn, setLiveConn] = useState({})
+          // 文件浏览区块展开/收起：连接成功后自动展开，用户可手动收起来
+          const [fsOpen, setFsOpen] = useState({})
           // 每台主机的 IP 是否明文显示（默认打码）
           const [eyeOpen, setEyeOpen] = useState({})
           const [chatReady, setChatReady] = useState({})
@@ -1031,30 +1025,52 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           useEffect(() => {
             let cancelled = false
             const pollConnections = async () => {
+              // 窗口在后台时跳过本轮，省一批 SSH 往返；回前台后下一轮会追上
+              if (typeof document !== 'undefined' && document.hidden === true) return
               for (const profile of profiles) {
                 try {
                   // 服务端非侵入式检测：终端状态 + 屏幕断线特征。
                   const data = await api('connection-state', { hostId: profile.id })
                   if (cancelled) return
+                  const alive = data.alive === true
                   setLiveConn(previous => {
-                    const next = data.alive === true
+                    const next = alive
                       ? { state: 'alive', connected: true }
                       : (data.reason === 'not-connected' || data.reason === 'terminal-exited'
                         ? { state: 'idle', connected: false }
                         : { state: 'unresponsive', connected: false })
                     const current = previous[profile.id]
+                    // 心跳每 30 秒一次，状态没变就不触发重渲染
                     if (current && current.state === next.state) return previous
                     return { ...previous, [profile.id]: next }
+                  })
+                  // 连接成功即主动展开文件区块；断开则收起，避免展示过期目录
+                  setFsOpen(previous => {
+                    if (alive) {
+                      if (previous[profile.id] === false) return previous // 用户手动收起过，尊重选择
+                      if (previous[profile.id] === true) return previous
+                      return { ...previous, [profile.id]: true }
+                    }
+                    if (previous[profile.id] === undefined) return previous
+                    const next = { ...previous }
+                    delete next[profile.id]
+                    return next
                   })
                 } catch {
                   if (!cancelled) {
                     setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'unresponsive', connected: false } }))
+                    setFsOpen(previous => {
+                      if (previous[profile.id] === undefined) return previous
+                      const next = { ...previous }
+                      delete next[profile.id]
+                      return next
+                    })
                   }
                 }
               }
             }
             void pollConnections()
-            // 每 30 秒后台探测一次
+            // 每 30 秒后台探测一次（与主机卡片的心跳共用同一轮）
             const timer = setInterval(() => { void pollConnections() }, 30000)
             return () => { cancelled = true; clearInterval(timer) }
           }, [keys])
@@ -1265,6 +1281,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   keepSession = true
                   setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession } }))
                   setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true } }))
+                  setFsOpen(previous => ({ ...previous, [profile.id]: true }))
+                  revealPanel()
                   setError(`${apiFailure.message}\n终端已保留；可点「打开新聊天」进入对应聊天手动处理。`)
                   return
                 }
@@ -1276,6 +1294,9 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               const copied = await copyToClipboard(prompt)
               setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession, prompt } }))
               setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true } }))
+              // 连接成功即展开文件浏览并切到本面板，让用户直接看到主机与文件
+              setFsOpen(previous => ({ ...previous, [profile.id]: true }))
+              revealPanel()
               setNotice(copied
                 ? text(tt, 'promptCopied', '连接已建立，推荐提示词已复制到剪贴板。可直接粘贴到任意聊天。')
                 : text(tt, 'promptCopyFailed', '连接已建立，但自动复制提示词失败。可点「推荐提示词」手动复制。'))
@@ -1452,6 +1473,29 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               && currentStatus.configured === true
               && !(profile.authMode === 'password' && currentStatus.hasPassword !== true)
             const connectable = currentStatus === undefined || currentStatus.failed === true || ready
+            const isAlive = liveConn[profile.id]?.state === 'alive'
+            const expanded = isAlive && fsOpen[profile.id] === true
+            // 已连接时渲染文件浏览区块；未连接不渲染任何占位
+            const fileBlock = isAlive
+              ? h('div', { className: 'dsh-ssh-fs-wrap' },
+                h('button', {
+                  type: 'button',
+                  className: 'dsh-ssh-fs-toggle',
+                  'aria-expanded': expanded,
+                  title: expanded
+                    ? text(tt, 'fsCollapse', '收起文件浏览')
+                    : text(tt, 'fsExpand', '展开文件浏览'),
+                  onClick: () => setFsOpen((prev) => ({ ...prev, [profile.id]: !expanded })),
+                },
+                  h('span', { className: 'dsh-ssh-fs-caret' }, expanded ? '▾' : '▸'),
+                  text(tt, 'fsTitle', 'SSH 服务文件'),
+                  h('span', { className: 'dsh-ssh-fs-badge' }, text(tt, 'fsConnectedBadge', '已连接')),
+                ),
+                expanded
+                  ? h(FileBrowserSection, { server: { id: profile.id, name: profile.name, username: profile.username, host: profile.host }, tt })
+                  : null,
+              )
+              : null
             return h('div', { className: 'dsh-ssh-card', key: profile.id },
               h('div', { className: 'dsh-ssh-card-top' },
                 h('div', { style: { minWidth: 0 } },
@@ -1526,6 +1570,10 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                       const ready = chatReady[profile.id]
                       // 只打开会话；提示词已在连接时复制到剪贴板，由用户自行粘贴。
                       try { ctx.uiWorkspace.openSession(ready.sessionId) } catch { /* 保留当前页。 */ }
+                      // 切换会话后右侧栏可能被别的面板占用，重新把 SSH 服务切到最前，
+                      // 让用户回到本面板就能直接看到该主机的文件。
+                      setFsOpen(previous => ({ ...previous, [profile.id]: true }))
+                      revealPanel()
                       setNotice(text(tt, 'promptNote', '已打开新聊天。推荐提示词在剪贴板中，粘贴到输入框后发送。'))
                     },
                   }, text(tt, 'openChat', '打开新聊天'))
@@ -1569,6 +1617,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   onClick: () => void removeProfile(profile),
                 }, pendingDelete === profile.id ? text(tt, 'confirmDelete', '确认删除') : text(tt, 'delete', '删除')),
               ),
+              // 已连接主机就地展开文件浏览；连接成功由 30 秒心跳自动触发
+              fileBlock,
             )
           }
 
@@ -1619,27 +1669,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           }],
         }), 'ssh-servers: tab type')
 
-        // 文件浏览：独立标签页
-        ctx.effect(() => ctx.sidebarRightTabs.register({
-          id: 'fs-file-browser',
-          kind: 'fs-file-browser',
-          title: () => text(t, 'fsTitle', 'SSH 服务文件'),
-          guide: [{
-            id: 'fs-file-browser',
-            order: 25,
-            title: () => text(t, 'fsTitle', 'SSH 服务文件'),
-            description: () => text(t, 'fsSub', '浏览已连接主机上的文件。'),
-            icon: FsIcon,
-          }],
-        }), 'ssh-servers: fs tab type')
-
-        ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
-          name: 'sidebar.right.pane.tab',
-          key: 'fs-file-browser',
-          locale: NS,
-          inject: (sessionId) => ({ sessionId }),
-        }, FileBrowserPanel)), 'ssh-servers: fs panel body')
-
+        // 文件浏览已并入 HostsPanel：主机连接成功后在该卡片内就地展开，
+        // 不再注册独立的「SSH 服务文件」标签页，也不再有单独的 panel body。
         ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
           name: 'sidebar.right.pane.tab',
           key: PLUGIN_ID,

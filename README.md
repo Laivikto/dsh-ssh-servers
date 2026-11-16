@@ -1,6 +1,6 @@
 # SSH Cloud Servers
 
-Manage SSH servers from the DSH Desktop right sidebar: custom names, saved key or password credentials, and IPv4 / IPv6 / dual-stack display. After connecting, the card updates in place and an SSH terminal is established, and a task prompt is copied to your clipboard so you can paste it wherever you like. A companion tab browses remote files over a separate SSH channel.
+Manage SSH servers from the DSH Desktop right sidebar: custom names, saved key or password credentials, and IPv4 / IPv6 / dual-stack display. After connecting, the card updates in place and an SSH terminal is established, and a task prompt is copied to your clipboard so you can paste it wherever you like. Once connected, the host's file browser expands right inside the same card.
 
 English | [简体中文](./README.zh.md)
 
@@ -12,7 +12,8 @@ English | [简体中文](./README.zh.md)
 - **Live connection health** — checked every 30 seconds; `✓ Connected` / `✗ Unresponsive` shown directly on the server card.
 - **In-place state changes** — after connecting you stay on the panel; the button turns into **Open new chat** so you decide when to move.
 - **Prompt auto-copied** — the task prompt lands in your system clipboard on connect, ready to paste into any chat or editor, without occupying the input box.
-- **Remote file browser** — a second tab lists, previews (text / image / hex) and downloads files on the connected host. It uses a separate `ssh` exec channel, so browsing never types into your terminal.
+- **Remote file browser (now inside the host card)** — no second tab to switch to. When a host connects, its card expands a file browser in place and loads the root directory; it collapses automatically when the connection drops. It uses a separate `ssh` exec channel, so browsing never types into your terminal.
+- **One 30-second heartbeat** — host health and the file browser share a single probe; it is skipped while the window is in the background and catches up on return.
 - **IPv4 / IPv6 / dual-stack display** — addresses resolved and shown once saved, masked by default behind an eye toggle.
 - **Host-key policies** — trust-on-first-use (TOFU) or strict verification against `known_hosts`.
 

@@ -112,5 +112,8 @@
   "authHint": "Both credentials can be saved; pick one at connect time.",
   "fsPreviewLoading": "Loading…",
   "fsPreviewClose": "Close",
-  "fsPreviewTruncated": "File is large — showing the first 1 MB"
+  "fsPreviewTruncated": "File is large — showing the first 1 MB",
+  "fsExpand": "Show files",
+  "fsCollapse": "Hide files",
+  "fsConnectedBadge": "Connected"
 }
