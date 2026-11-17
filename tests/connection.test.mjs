@@ -95,8 +95,9 @@ describe('SSH 命令构造（详细）', () => {
     hostKeyPolicy: 'accept-new',
   })
 
-  test('启用 -v 且以 ssh 开头', () => {
-    assert.match(cmd, /^ssh -v /)
+  test('使用 VERBOSE 日志级别且以 ssh 开头', () => {
+    // VERBOSE 保留 "Authenticated to" 供登录判定，但不打印私钥路径（debug1: Will attempt key）
+    assert.match(cmd, /^ssh -o LogLevel=VERBOSE /)
   })
 
   test('私钥路径不进命令', () => {
@@ -132,8 +133,9 @@ describe('工具守卫', () => {
 })
 
 describe('命令执行与输出捕获', () => {
-  test('执行命令并捕获远端输出', async () => {
+  test('执行命令并通过哨兵行判定结束', async () => {
     let transcript = ''
+    let echoCommand = ''
     const terminal = {
       id: 'run-test',
       info: { state: 'running' },
@@ -147,11 +149,51 @@ describe('命令执行与输出捕获', () => {
         }
       },
       async write(data) {
+        // 模拟真实 shell：执行整行（命令 + ; echo 哨兵 $?），输出命令结果与哨兵行
         assert.equal(data.endsWith('\r'), true, '命令应以回车结尾')
-        transcript += `root@host:~# ${data.trim()}\nLinux dsh-test 6.1.0-test x86_64 GNU/Linux\nroot@host:~# `
+        const line = data.replace(/\r$/, '')
+        const parts = line.split('; echo ')
+        const userCommand = parts[0]
+        const sentinelExpr = parts[1] ?? ''
+        echoCommand = sentinelExpr
+        transcript += `root@host:~# ${userCommand}\nLinux dsh-test 6.1.0-test x86_64 GNU/Linux\n`
+        // 模拟 $? 展开：成功命令返回 0
+        transcript += `${sentinelExpr.replace(' $?', ' 0')}\n`
+        transcript += 'root@host:~# '
       },
     }
     const output = await runAndCapture({ terminal }, 'uname -a', new AbortController().signal)
-    assert.match(output, /Linux dsh-test 6\.1\.0-test/)
+    assert.match(output.text, /Linux dsh-test 6\.1\.0-test/)
+    assert.equal(output.exitCode, 0)
+    // 哨兵行不应出现在返回给模型的文本里
+    assert.equal(output.text.includes('__DSH_DONE_'), false, '哨兵行必须被剥离')
+    assert.match(echoCommand, /__DSH_DONE_[0-9a-f]{8}_/, '命令应附带唯一哨兵')
+  })
+
+  test('非零退出码会体现在返回值里', async () => {
+    let transcript = ''
+    const terminal = {
+      id: 'run-test-fail',
+      info: { state: 'running' },
+      read() { return { text: transcript } },
+      async drain() {},
+      mark() {
+        const base = transcript
+        return {
+          lines() { return { lines: transcript.slice(base.length).split('\n'), truncated: false } },
+          dispose() {},
+        }
+      },
+      async write(data) {
+        const line = data.replace(/\r$/, '')
+        const parts = line.split('; echo ')
+        const sentinelExpr = parts[1] ?? ''
+        transcript += `root@host:~# ls /no/such/dir\nls: cannot access: No such file\n`
+        transcript += `${sentinelExpr.replace(' $?', ' 2')}\n`
+        transcript += 'root@host:~# '
+      },
+    }
+    const output = await runAndCapture({ terminal }, 'ls /no/such/dir', new AbortController().signal)
+    assert.equal(output.exitCode, 2)
   })
 })

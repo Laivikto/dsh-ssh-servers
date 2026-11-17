@@ -3,6 +3,30 @@
 本项目的所有重要变更都记录在此文件。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] - 2026-11-17
+
+一批安全修复、功能 bug 修复与死代码清理（来自完整代码审查，28 条中的 12 条高优先级项）。
+
+### 安全
+
+- **私钥路径不再进入 AI 上下文**：SSH 命令从 `-v` 改为 `-o LogLevel=VERBOSE`——登录判定所需的 `Authenticated to` 保留，但 `debug1: Will attempt key: <私钥路径>` 不再打印到终端屏幕。
+- **密码不再可能被回显**：密码/口令提示检测从全文匹配改为只检查最后一个非空行，登录 Banner 里恰好以 `Password:` 结尾的行不再误触发密码注入。
+- **文件通道认证失败的报错可操作**：带口令私钥或密码主机使用文件浏览时，明确提示改用 ssh-agent / 无口令密钥，而不是 ssh 的原始英文 stderr。
+
+### 修复
+
+- **非 GNU 服务器目录假空**：列出目录前先探测（存在/可读/是否支持 `-printf`），BusyBox（Alpine）、BSD、macOS 正确回退到 `ls -la`；不存在的目录返回明确错误而不是「空目录」。
+- **切换 IP 显示不再丢失文件浏览位置**（1.3.0 回归）：文件浏览区块改收原始值 props，内部对象引用稳定，任何 UI 刷新都不再把浏览目录重置到根。
+- **AI 命令结束判定改用唯一哨兵**：每条命令追加 `; echo __DSH_DONE_<hash>__ $?`，`下载中 45%` 这类行不再被误判为提示符；vim/top 等交互程序超时 300 秒会明确报错；命令真实退出码（非零时）附在输出末尾。
+- **文件列表条目数恢复显示**：底部文案支持 `{count}` 占位符，「共 N 项」不再被字典短路吞掉。
+- **StrictMode 下连接按钮卡死**：HostsPanel 的 `mounted` 引用在二次挂载时正确复位。
+
+### 清理
+
+- 删除死代码：无引用的 `FsIcon`、`findConnectionByHostId`、重复的卸载 effect、只写不读的 `keyPick.error`；断线检测复用 `looksDisconnected()`；修正错位的 JSDoc；移除 6 个不再使用的文案键（三处来源同步清理）。
+- Windows shell 判断收敛为 `isCmdShell()`；主机状态徽章三段重复 IIFE 收敛为 `chipInfo()`。
+- 可访问性：目录图标支持 Enter/Space 进入并带 aria-label；错误横幅关闭按钮补 aria-label。
+
 ## [1.3.1] - 2026-11-17
 
 ### 变更

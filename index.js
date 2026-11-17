@@ -46,17 +46,9 @@ function normalizeKeyPath(value) {
 }
 
 /**
- * 列出某个目录下的「可能是私钥」的文件，供 GUI 的密钥选择器点选。
- *
- * 背景：DSH 桌面端的原生选择器（window.__DSH_DIRECTORY_PICKER__）使用 Win32
- * IFileOpenDialog 并硬编码了 FOS_PICKFOLDERS，只能选目录、不能选文件。
- * 因此 GUI 先让用户选目录，再由本接口列出候选文件，用户点选后得到绝对路径。
- *
- * 安全约束：
- * - 只接受绝对路径，不做任何 shell 展开；
- * - 只读，不修改文件系统；
- * - 最多返回 MAX_ENTRIES 项，避免超大目录拖垮响应；
- * - 不返回文件内容，仅名字/大小/是否疑似私钥。
+ * SSH 断线特征（终端屏幕文本）。供心跳与连接监视共用。
+ * KEY_FILE_HINT：文件名是否「疑似私钥」（GUI 密钥选择器用）。
+ * MAX_ENTRIES：目录列表与密钥候选共用的条目上限。
  */
 const DISCONNECT_PATTERN = /(?:Connection to .* closed|Connection reset by|client_loop:|Broken pipe|Connection closed by remote host|Disconnected from)/iu
 const KEY_FILE_HINT = /^(id_(rsa|dsa|ecdsa|ed25519)|.*\.(pem|key|ppk|openssh|priv))$/iu
@@ -96,6 +88,11 @@ function mapConnectionState(data) {
   return 'unresponsive'
 }
 
+/**
+ * 列出某个目录下的「可能是私钥」的文件，供 GUI 的密钥选择器点选。
+ * DSH 桌面端原生选择器只能选目录、不能选文件，因此 GUI 先选目录再由本接口列候选。
+ * 安全约束：只接受绝对路径、只读、最多 MAX_ENTRIES 项、不返回文件内容。
+ */
 async function listKeyCandidates(rawDir) {
   const dir = typeof rawDir === 'string' ? rawDir.trim() : ''
   if (dir === '' || dir.length > 1024 || /[\0\r\n]/u.test(dir)) return { ok: false, code: 'invalid-dir', message: '目录无效。' }
@@ -303,13 +300,20 @@ function cmdQuote(value) {
 
 function shellQuoteFactory(shellName) {
   if (process.platform !== 'win32') return posixQuote
-  return /cmd(?:\.exe)?$/iu.test(shellName) ? cmdQuote : psQuote
+  return isCmdShell(shellName) ? cmdQuote : psQuote
+}
+
+/** Windows 下判断 shell 是否为 cmd.exe（三处调用共用，避免正则重复）。 */
+function isCmdShell(shellName) {
+  return /cmd(?:\.exe)?$/iu.test(shellName)
 }
 
 function buildSshCommand({ shellName, host, port, username, authMode, hostKeyPolicy }) {
   const quote = shellQuoteFactory(shellName)
   const emptyConfig = process.platform === 'win32' ? 'NUL' : '/dev/null'
-  const parts = ['ssh', '-v', '-F', emptyConfig]
+  // VERBOSE 与 -v（DEBUG1）同样输出 "Authenticated to ..." 用于判定登录成功，
+  // 但不会打印 debug1: Will attempt key: <私钥路径>，避免私钥路径进入屏幕与 AI 上下文。
+  const parts = ['ssh', '-o', 'LogLevel=VERBOSE', '-F', emptyConfig]
   const option = (name, value) => {
     parts.push(name, quote(value))
   }
@@ -332,14 +336,14 @@ function buildSshCommand({ shellName, host, port, username, authMode, hostKeyPol
     option('-o', 'IdentitiesOnly=yes')
     // 私钥路径通过终端环境变量传入，避免出现在命令回显、屏幕历史和工具读取结果中。
     if (process.platform === 'win32') {
-      parts.push('-i', /cmd(?:\.exe)?$/iu.test(shellName) ? '"%DSH_SSH_KEY_PATH%"' : '"$env:DSH_SSH_KEY_PATH"')
+      parts.push('-i', isCmdShell(shellName) ? '"%DSH_SSH_KEY_PATH%"' : '"$env:DSH_SSH_KEY_PATH"')
     } else {
       parts.push('-i', '"$DSH_SSH_KEY_PATH"')
     }
   }
   const hostArgument = quote(host)
   if (process.platform === 'win32') {
-    if (/cmd(?:\.exe)?$/iu.test(shellName)) parts.push(`${hostArgument} & exit`)
+    if (isCmdShell(shellName)) parts.push(`${hostArgument} & exit`)
     else parts.push(`${hostArgument}; exit`)
   } else {
     parts.push(`${hostArgument}; exit`)
@@ -399,7 +403,10 @@ async function waitForConnection(terminal, options, loginMark) {
     if (failure !== undefined) {
       return { ok: false, code: 'ssh-failed', message: failure }
     }
-    const passwordPrompt = /password(?:\s+for\s+[^:\n]+)?:\s*$/imu.test(transcript) || /password:\s*$/imu.test(transcript)
+    // 只检查最后一个非空行：/m 全文匹配会把登录 Banner 里恰好以 "Password:" 结尾的
+    // 行误认成提示符，导致密码被提前写进 PTY 并在登录后回显给 AI。
+    const lastLine = lastNonEmptyLine(transcript)
+    const passwordPrompt = /password(?:\s+for\s+[^:\n]+)?:\s*$/iu.test(lastLine) || /password:\s*$/iu.test(lastLine)
     if (passwordPrompt && !passwordSent) {
       if (options.password === undefined) {
         return { ok: false, code: 'password-required', message: '服务器要求密码，但该配置没有保存密码。请在右侧终端中输入，或编辑配置后重试。' }
@@ -409,7 +416,7 @@ async function waitForConnection(terminal, options, loginMark) {
       await sleep(250)
       continue
     }
-    const passphrasePrompt = /Enter passphrase for key[^\n]*:\s*$/imu.test(transcript)
+    const passphrasePrompt = /Enter passphrase for key[^\n]*:\s*$/iu.test(lastLine)
     if (passphrasePrompt && !passphraseSent) {
       if (options.passphrase === undefined) {
         return { ok: false, code: 'passphrase-required', message: '私钥需要口令，但该配置没有保存口令。请在右侧终端中输入，或编辑配置后重试。' }
@@ -425,9 +432,10 @@ async function waitForConnection(terminal, options, loginMark) {
     if (passphraseSent && /Permission denied/iu.test(transcript)) {
       return { ok: false, code: 'auth-failed', message: '密钥或口令认证失败。请检查私钥路径和口令。' }
     }
+    // VERBOSE 级别不再输出 "debug1: Entering interactive session."，
+    // 登录成功只认 "Authenticated to ..."：PTY 与 shell 在此后即绪。
     const authMatch = /(?:^|\n)Authenticated to [^\n]*/u.exec(transcript)
-    const enteredMatch = /(?:^|\n)debug1: Entering interactive session\./u.exec(transcript)
-    if (authMatch !== null && enteredMatch !== null && enteredMatch.index > authMatch.index) {
+    if (authMatch !== null) {
       await sleep(150)
       return { ok: true, terminalId: terminal.id }
     }
@@ -594,7 +602,8 @@ async function connectHandler(ctx, req, res) {
         return
       }
       const screen = readScreenText(terminal, 60)
-      if (/(?:Connection to .* closed|client_loop:|Connection reset by|Broken pipe|Connection closed by)/iu.test(screen)) {
+      // 复用全局断线特征正则，避免两份正则日后改不同步
+      if (looksDisconnected(screen)) {
         dropConnection(agent.id, connection)
       }
     }, 1500)
@@ -951,6 +960,11 @@ function execRemote(target, command, options = {}) {
         return
       }
       const stderr = Buffer.concat(errChunks).toString('utf8').trim()
+      // BatchMode 下带口令的私钥会失败：把 ssh 的原始英文 stderr 翻译成可操作的提示。
+      if (/permission denied \(publickey[^)]*\)/iu.test(stderr) || (code === 255 && /publickey/iu.test(stderr))) {
+        finish(reject, new Error('文件通道只用密钥认证，且不支持在后台输入私钥口令。若该密钥设有口令，请先用 ssh-agent 或生成无口令密钥；密码认证的主机请在终端里连接后手动查看文件。'))
+        return
+      }
       finish(reject, new Error(stderr || `ssh 退出码 ${code}`))
     })
   })
@@ -1025,21 +1039,10 @@ function normalizeRemotePath(value) {
   return collapsed.replace(/\/+$/, '') || '/'
 }
 
-/** 按连接找一台当前可用的 SSH 会话。 */
-function findConnectionByHostId(hostId) {
-  for (const connection of connections.values()) {
-    if (connection.hostId !== hostId) continue
-    if (connection.terminal?.info?.state === 'running' || connection.terminal?.info?.state === undefined) {
-      return connection
-    }
-  }
-  return undefined
-}
-
 /**
  * 列出远端目录。
- * 用 `ls -la --time-style=+%s` 拿秒级时间戳，再配合 find 判断类型。
- * 为避免解析歧义，改用 `find -maxdepth 1 -printf` 输出结构化字段。
+ * 先探测目录可读性再分支：GNU find 用 -printf 拿结构化字段，
+ * BusyBox/BSD/macOS 退回朴素 ls -la。
  */
 async function fsListHandler(ctx, req, res) {
   if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
@@ -1081,19 +1084,37 @@ async function fsListHandler(ctx, req, res) {
 
   try {
     // 走独立 exec 通道：不写终端、不产生回显
-    // 两端打标记：execRemote 返回的是纯 stdout，但标记能可靠区分「空目录」与「命令未执行」
-    const gnuCmd = `echo ${FS_BEGIN}; find ${posixQuote(dir)} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%T@\\t%m\\t%f\\n' 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+    // 一次远端调用完成三件事，避免三次 SSH 握手：
+    //   1. 探测目录是否存在且可读（不存在/无权限 → __ERR__，回退分支也跳过，直接报错）
+    //   2. 探测 find 是否支持 -printf（GNU find → __GNU__；BusyBox/BSD/macOS → 空）
+    //   3. 按 find 或 ls 列出目录
+    // 这样修复了旧实现「-printf 失败被 2>/dev/null 吞掉、head 退出码 0、
+    // 标记照常输出 → 解析成空数组而不是 null → ls 回退永不触发」的问题。
+    const quoted = posixQuote(dir)
+    const probeCmd =
+      `echo ${FS_BEGIN}; ` +
+      `if [ ! -d ${quoted} ] || [ ! -r ${quoted} ] || [ ! -x ${quoted} ]; then echo __ERR__; ` +
+      `elif find ${quoted} -maxdepth 1 -mindepth 1 -printf '' >/dev/null 2>&1; then echo __GNU__; ` +
+      `fi; echo ${FS_END}`
+    const probeRaw = await execRemote(target, probeCmd, { timeoutMs: 15_000 })
+    const probeLines = extractMarkedLines(probeRaw, FS_BEGIN, FS_END)
+    if (probeLines === null) {
+      return writeJson(res, 500, { ok: false, code: 'list-failed', message: '无法探测远端目录状态。' })
+    }
+    if (probeLines.includes('__ERR__')) {
+      return writeJson(res, 404, { ok: false, code: 'dir-unreadable', message: '目录不存在或没有读取权限。' })
+    }
+    const isGnu = probeLines.includes('__GNU__')
+
     let entries = null
-    try {
+    if (isGnu) {
+      // GNU find：一次拿到类型/大小/时间/权限/名字
+      const gnuCmd = `echo ${FS_BEGIN}; find ${quoted} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%T@\\t%m\\t%f\\n' 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
       const raw = await execRemote(target, gnuCmd, { timeoutMs: 20_000 })
       entries = parseFindOutput(raw)
-    } catch {
-      entries = null
-    }
-
-    // 回退：find 不支持 -printf 时用 ls
-    if (entries === null) {
-      const lsCmd = `echo ${FS_BEGIN}; ls -la --time-style=+%s ${posixQuote(dir)} 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+    } else {
+      // 非 GNU：BusyBox ls 不支持 --time-style，用最朴素的 ls -la（parseLsOutput 自带解析）
+      const lsCmd = `echo ${FS_BEGIN}; ls -la ${quoted} 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
       const raw = await execRemote(target, lsCmd, { timeoutMs: 20_000 })
       entries = parseLsOutput(raw)
     }
@@ -1595,25 +1616,29 @@ async function runAndCapture(connection, command, signal) {
   if (terminal.info?.state !== 'running') throw new Error('SSH 终端已退出，请重新连接。')
   const mark = terminal.mark()
   try {
-    await terminal.write(command + '\r')
+    // 唯一哨兵：命令结束后 shell 会执行 echo __DSH_DONE_<随机>__ <退出码>。
+    // 这能准确判定结束（避免把「下载中 45%」这类行误判为提示符），
+    // 同时拿到真实退出码；随机数防止输出里恰好包含哨兵字样导致误判。
+    const sentinel = `__DSH_DONE_${createHash('sha256').update(command).digest('hex').slice(0, 8)}_${Date.now().toString(36)}__`
+    await terminal.write(`${command}; echo ${sentinel} $?\r`)
+    const donePattern = new RegExp(`(?:^|\\n)\\s*${sentinel}\\s+(\\d+)\\s*(?:\\n|$)`, 'u')
     const deadline = Date.now() + 300_000
     let last = ''
-    let stableSince = Date.now()
     while (Date.now() < deadline) {
       if (signal.aborted) throw new Error('命令执行已取消。')
       await sleep(350)
       await terminal.drain().catch(() => {})
       const current = mark.lines().lines.join('\n')
-      if (current !== last) {
-        last = current
-        stableSince = Date.now()
-      } else if (Date.now() - stableSince > 1400) {
-        // 远端命令结束时通常回到 Shell 提示符。仅在屏幕稳定且末行像提示符时结束，
-        // 避免把长时间静默的命令（例如 sleep 或 apt 的下载阶段）误判为完成。
-        if (hasShellPrompt(current)) break
+      last = current
+      const done = donePattern.exec(current)
+      if (done !== null) {
+        // 掐掉哨兵行本身，只把命令自己的输出交给模型。
+        const text = current.slice(0, done.index) + current.slice(done.index + done[0].length)
+        return { text: truncateText(text), exitCode: Number(done[1]) }
       }
     }
-    return truncateText(last)
+    // 超时：告知调用方命令仍在远端运行，而不是静默返回一段可能不完整的输出。
+    throw new Error(`命令在 300 秒内未结束（可能是交互式程序如 vim/top，请改用非交互方式），已停止等待。`)
   } finally {
     try { mark.dispose() } catch { /* 终端可能已关闭。 */ }
   }
@@ -1721,10 +1746,11 @@ function registerTools(ctx) {
       const selected = answer?.answers?.find(item => item.id === 'confirm')?.selected ?? []
       if (!selected.includes('允许执行')) throw new Error('用户拒绝了该命令，未执行。')
       const output = await runAndCapture(connection, command, exec.signal)
+      const exitNote = output.exitCode === 0 ? '' : `\n[退出码: ${output.exitCode}]`
       return {
         connected: true,
         server: `${connection.username}@${connection.host}:${connection.port}`,
-        text: output,
+        text: output.text + exitNote,
       }
     },
   })

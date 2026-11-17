@@ -49,7 +49,6 @@ window.__ModuleLoader__.load({
       ipv4: 'IPv4',
       ipv6: 'IPv6',
       both: '双栈',
-      ipv4Short: 'IPv4',
       ipv6Short: 'IPv6',
       unresolved: '地址未解析',
       credentialSaved: '连接凭据已保存',
@@ -96,9 +95,6 @@ window.__ModuleLoader__.load({
       copyPrompt: '推荐提示词',
       copyPromptHint: '复制推荐的 SSH 检查提示词到剪贴板',
       fsTitle: 'SSH 服务文件',
-      fsSub: '浏览已连接主机上的文件。',
-      fsNoServer: '没有已连接的主机',
-      fsNoServerHint: '请先连接一台主机，再浏览文件。',
       fsLoading: '加载中…',
       fsRefresh: '刷新',
       fsUp: '上一级',
@@ -116,8 +112,6 @@ window.__ModuleLoader__.load({
       fsEmptyDir: '目录为空',
       fsDownload: '下载',
       fsFoot: '目录不可下载 · 单文件上限 8 MB',
-      viewHosts: '主机',
-      viewFiles: '文件',
       showIp: '显示完整 IP',
       hideIp: '隐藏完整 IP',
       fullIp: '完整 IP',
@@ -166,7 +160,6 @@ window.__ModuleLoader__.load({
       ipv4: 'IPv4',
       ipv6: 'IPv6',
       both: 'Both',
-      ipv4Short: 'IPv4',
       ipv6Short: 'IPv6',
       unresolved: 'Address not resolved',
       credentialSaved: 'Connection credential saved',
@@ -213,9 +206,6 @@ window.__ModuleLoader__.load({
       copyPrompt: 'Suggested prompt',
       copyPromptHint: 'Copy the suggested SSH review prompt to the clipboard',
       fsTitle: 'SSH files',
-      fsSub: 'Browse files on a connected host.',
-      fsNoServer: 'No connected host',
-      fsNoServerHint: 'Connect a host first, then browse its files.',
       fsLoading: 'Loading…',
       fsRefresh: 'Refresh',
       fsUp: 'Up one level',
@@ -233,8 +223,6 @@ window.__ModuleLoader__.load({
       fsEmptyDir: 'Empty directory',
       fsDownload: 'Download',
       fsFoot: 'Directories cannot be downloaded · 8 MB per file',
-      viewHosts: 'Hosts',
-      viewFiles: 'Files',
       showIp: 'Show full IP',
       hideIp: 'Hide full IP',
       fullIp: 'Full IP',
@@ -553,27 +541,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 文件浏览图标：与 SshIcon（钥匙）区分开，
-     * 用「文件夹 + 内容行」表示文件浏览区块，同样保持细线条风格。
-     */
-    function FsIcon({ size = 18 }) {
-      return h('svg', {
-        width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
-        'aria-hidden': true, focusable: 'false',
-      },
-        h('rect', { x: 3, y: 5, width: 18, height: 14, rx: 2.5, stroke: 'currentColor', strokeWidth: 1.6 }),
-        h('path', {
-          d: 'M6.8 8.8h3l1.6 1.6v4.5H6.8z',
-          stroke: 'currentColor', strokeWidth: 1.3, strokeLinejoin: 'round',
-        }),
-        h('path', {
-          d: 'M13.4 10.4h4M13.4 13.2h2.8',
-          stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round',
-        }),
-      )
-    }
-
-    /**
      * 插件图标：一把斜置的密钥。
      * 通用终端窗口（方框 + `>_`）辨识度太低，这里改用钥匙——
      * SSH 最本质的特征是密钥认证，钥匙能一眼把它和普通终端区分开，
@@ -728,11 +695,19 @@ For destructive operations (deleting files, changing system config, reboot/shutd
     /**
      * 文件浏览区块。
      * 由 HostsPanel 在「主机已连接」时内联渲染，不再作为独立标签页。
-     * 连接状态由 HostsPanel 的 30 秒心跳统一驱动（server 为 null 即未连接）。
+     * 连接状态由 HostsPanel 的 30 秒心跳统一驱动。
+     * props 只收原始值（hostId/name/username/host），收不到对象——
+     * 父组件每帧渲染都传新对象会让 load 的 useCallback 反复失效，
+     * 触发「切眼睛图标就跳回根目录」的回归。
      */
     function FileBrowserSection(props) {
-      const { server, tt: sectionT } = props
+      const { hostId, hostName, hostUser, hostAddr, tt: sectionT } = props
       const tt = sectionT ?? ((k, d) => d ?? k)
+      // server 只在 id 变化时重建：引用稳定，load 的依赖不再抖动
+      const server = React.useMemo(
+        () => ({ id: hostId, name: hostName, username: hostUser, host: hostAddr }),
+        [hostId, hostName, hostUser, hostAddr],
+      )
       const [path, setPath] = React.useState('/')
       const [parent, setParent] = React.useState(null)
       const [entries, setEntries] = React.useState([])
@@ -752,7 +727,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         alive.current = true
         return () => { alive.current = false }
       }, [])
-      React.useEffect(() => () => { alive.current = false }, [])
 
       // 连接状态由 HostsPanel 的心跳统一提供（server 变化即代表连接/断开）。
       // 换主机时回到根目录并清掉上一台的预览与筛选。
@@ -765,10 +739,9 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         setError('')
         setNotice('')
         previewSeq.current++
-      }, [server === null ? '' : server.id])
+      }, [hostId])
 
       const load = React.useCallback(async (targetPath) => {
-        if (server === null) return
         // 换目录后旧预览已失效，同时作废在途的预览请求
         previewSeq.current++
         setPreviewFile(null)
@@ -792,8 +765,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
 
       // 主机确定后自动进根目录
       React.useEffect(() => {
-        if (server !== null) void load('/')
-      }, [server, load])
+        void load('/')
+      }, [server.id, load])
 
       const openEntry = (entry) => {
         if (entry.type === 'dir') {
@@ -808,7 +781,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
 
       /** 点击文件：在面板内预览内容。 */
       const openPreview = async (entry) => {
-        if (server === null) return
+        if (hostId === undefined) return
         const full = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`
         const mine = ++previewSeq.current
         setPreviewFile({ loading: true, name: entry.name, path: full, size: entry.size })
@@ -836,7 +809,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       }
 
       const download = async (entry) => {
-        if (server === null) return
+        if (hostId === undefined) return
         setError('')
         setNotice('')
         const full = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`
@@ -880,7 +853,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       }, [entries, filter, sortBy, sortAsc])
 
       // 未连接时内联区块整体不渲染（HostsPanel 只在已连接时挂载它）
-      if (server === null) return null
+      if (hostId === undefined) return null
 
       return h('div', { className: 'dsh-fs-section' },
         h('div', { className: 'dsh-fs-section-head' },
@@ -895,7 +868,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         ),
         error !== '' ? h('div', { className: 'dsh-ssh-banner', role: 'alert' },
           h('span', null, error),
-          h('button', { type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost', onClick: () => setError('') }, '×'),
+          h('button', { type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost', 'aria-label': '关闭错误提示', onClick: () => setError('') }, '×'),
         ) : null,
         notice !== '' ? h('div', { className: 'dsh-ssh-ok', role: 'status' }, notice) : null,
         h('div', { className: 'dsh-fs-pathbar' },
@@ -947,6 +920,16 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                     onClick: entry.type === 'dir' ? () => openEntry(entry) : undefined,
                     role: entry.type === 'dir' ? 'button' : undefined,
                     tabIndex: entry.type === 'dir' ? 0 : undefined,
+                    // 键盘可达：Enter / Space 进入目录（与 onClick 等效）
+                    onKeyDown: entry.type === 'dir'
+                      ? (event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          openEntry(entry)
+                        }
+                      }
+                      : undefined,
+                    'aria-label': entry.type === 'dir' ? `${entry.name}（进入目录）` : undefined,
                   }, entry.type === 'dir' ? '📁' : entry.type === 'link' ? '🔗' : '📄'),
                   h('span', {
                     className: 'dsh-fs-label' + (entry.type === 'dir' ? '' : ' is-file'),
@@ -974,7 +957,10 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               )),
         ),
         h('div', { className: 'dsh-ssh-note' },
-          text(tt, 'fsFoot', '共 ' + sorted.length + ' 项 · 目录不可下载 · 单文件上限 8 MB')),
+          // 条目数插进翻译后的文案：text() 命中字典后兜底不会生效，
+          // 所以条目数必须在这里手动拼进结果。
+          text(tt, 'fsFoot', '目录不可下载 · 单文件上限 8 MB').replace('{count}', String(sorted.length))
+            + (text(tt, 'fsFoot', '').includes('{count}') ? '' : ` · ${sorted.length} 项`)),
         previewFile !== null
           ? h('div', { className: 'dsh-fs-preview' },
             h('div', { className: 'dsh-fs-preview-head' },
@@ -1032,7 +1018,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           const [status, setStatus] = useState({})
           const [statusTick, setStatusTick] = useState(0)
           const [pendingDelete, setPendingDelete] = useState(null)
-          const [keyPick, setKeyPick] = useState({ open: false, loading: false, dir: '', files: [], error: '' })
+          const [keyPick, setKeyPick] = useState({ open: false, loading: false, dir: '', files: [] })
           const [liveConn, setLiveConn] = useState({})
           // 文件浏览区块展开/收起：连接成功后自动展开，用户可手动收起来
           const [fsOpen, setFsOpen] = useState({})
@@ -1040,7 +1026,13 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           const [eyeOpen, setEyeOpen] = useState({})
           const [chatReady, setChatReady] = useState({})
           const mounted = useRef(true)
-          useEffect(() => () => { mounted.current = false }, [])
+          // 挂载时显式置 true：StrictMode 会「挂载→清理→再挂载」，
+          // 只在清理里置 false 会让第二次挂载后一直认为已卸载，
+          // 连接按钮会永远卡在「正在连接…」。
+          useEffect(() => {
+            mounted.current = true
+            return () => { mounted.current = false }
+          }, [])
           const keys = useMemo(() => profileKey(profiles), [profiles])
 
           useEffect(() => {
@@ -1134,23 +1126,23 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           const setField = (name, value) => setForm(current => current === null ? current : ({ ...current, [name]: value }))
 
           const browseKeyDir = async () => {
-            setKeyPick({ open: false, loading: true, dir: '', files: [], error: '' })
+            setKeyPick({ open: false, loading: true, dir: '', files: [] })
             const picked = await nativePickDirectory()
             if (!mounted.current) return
             if (!picked) {
-              setKeyPick({ open: false, loading: false, dir: '', files: [], error: '' })
+              setKeyPick({ open: false, loading: false, dir: '', files: [] })
               setError(text(tt, 'keyPickUnsupported', '当前环境不支持原生文件选择，请手动填写私钥路径。'))
               return
             }
             try {
               const data = await listKeyFiles(picked)
               if (!mounted.current) return
-              setKeyPick({ open: true, loading: false, dir: data.dir, files: data.files ?? [], error: '' })
+              setKeyPick({ open: true, loading: false, dir: data.dir, files: data.files ?? [] })
             } catch (reason) {
               if (!mounted.current) return
               const message = reason instanceof ApiError ? reason.message : String(reason)
               setError(message)
-              setKeyPick({ open: false, loading: false, dir: '', files: [], error: '' })
+              setKeyPick({ open: false, loading: false, dir: '', files: [] })
             }
           }
 
@@ -1419,7 +1411,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                           h('span', null, text(tt, 'keyPickDir', '从该目录选择文件') + '：' + keyPick.dir),
                           h('button', {
                             type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost',
-                            onClick: () => setKeyPick({ open: false, loading: false, dir: '', files: [], error: '' }),
+                            onClick: () => setKeyPick({ open: false, loading: false, dir: '', files: [] }),
                           }, text(tt, 'close', '关闭')),
                         ),
                         keyPick.files.length === 0
@@ -1432,7 +1424,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                                 title: file.path,
                                 onClick: () => {
                                   setField('keyPath', file.path)
-                                  setKeyPick({ open: false, loading: false, dir: '', files: [], error: '' })
+                                  setKeyPick({ open: false, loading: false, dir: '', files: [] })
                                 },
                               },
                                 h('span', { className: 'dsh-ssh-keyname' }, file.name),
@@ -1485,6 +1477,18 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             )
           }
 
+          /** 连接状态徽章：一次算出 className/label/title，替代原先三段重复的 IIFE。 */
+          const chipInfo = (profile, ready) => {
+            const st = liveConn[profile.id]?.state
+            if (st === 'alive') return { className: 'dsh-ssh-chip-ok', label: text(tt, 'connected', '已连接'), title: text(tt, 'connected', '已连接') }
+            if (st === 'unresponsive') return { className: 'dsh-ssh-chip-error', label: text(tt, 'unresponsive', '未响应'), title: text(tt, 'unresponsive', '未响应') }
+            return {
+              className: ready ? 'dsh-ssh-chip-idle' : 'dsh-ssh-chip-warn',
+              label: ready ? text(tt, 'credentialReady', '凭据就绪') : text(tt, 'needConfig', '待配置'),
+              title: statusLine(profile),
+            }
+          }
+
           const renderCard = (profile) => {
             const rows = addressRows(profile)
             const addressData = addresses[profile.id]
@@ -1513,7 +1517,13 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   h('span', { className: 'dsh-ssh-fs-badge' }, text(tt, 'fsConnectedBadge', '已连接')),
                 ),
                 expanded
-                  ? h(FileBrowserSection, { server: { id: profile.id, name: profile.name, username: profile.username, host: profile.host }, tt })
+                  ? h(FileBrowserSection, {
+                    hostId: profile.id,
+                    hostName: profile.name,
+                    hostUser: profile.username,
+                    hostAddr: profile.host,
+                    tt,
+                  })
                   : null,
               )
               : null
@@ -1560,25 +1570,10 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   ),
                 ),
                 h('span', {
-                  className: `dsh-ssh-chip ${(() => {
-                    const st = liveConn[profile.id]?.state
-                    if (st === 'alive') return 'dsh-ssh-chip-ok'
-                    if (st === 'unresponsive') return 'dsh-ssh-chip-error'
-                    return ready ? 'dsh-ssh-chip-idle' : 'dsh-ssh-chip-warn'
-                  })()}`,
-                  title: (() => {
-                    const st = liveConn[profile.id]?.state
-                    if (st === 'alive') return text(tt, 'connected', '已连接')
-                    if (st === 'unresponsive') return text(tt, 'unresponsive', '未响应')
-                    return statusLine(profile)
-                  })(),
+                  className: `dsh-ssh-chip ${chipInfo(profile, ready).className}`,
+                  title: chipInfo(profile, ready).title,
                 },
-                  (() => {
-                    const st = liveConn[profile.id]?.state
-                    if (st === 'alive') return text(tt, 'connected', '已连接')
-                    if (st === 'unresponsive') return text(tt, 'unresponsive', '未响应')
-                    return ready ? text(tt, 'credentialReady', '凭据就绪') : text(tt, 'needConfig', '待配置')
-                  })(),
+                  chipInfo(profile, ready).label,
                 ),
               ),
               h('div', { className: 'dsh-ssh-note' }, statusLine(profile)),
@@ -1657,7 +1652,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             ),
             error !== '' ? h('div', { className: 'dsh-ssh-banner', role: 'alert' },
               h('span', null, error),
-              h('button', { type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost', onClick: () => setError('') }, '×'),
+              h('button', { type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost', 'aria-label': '关闭错误提示', onClick: () => setError('') }, '×'),
             ) : null,
             notice !== '' ? h('div', { className: 'dsh-ssh-ok', role: 'status', 'aria-live': 'polite' }, notice) : null,
             renderForm(),
