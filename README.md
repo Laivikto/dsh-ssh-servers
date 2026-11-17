@@ -16,6 +16,7 @@ English | [简体中文](./README.zh.md)
 - **One 30-second heartbeat** — host health and the file browser share a single probe; it is skipped while the window is in the background and catches up on return.
 - **IPv4 / IPv6 / dual-stack display** — addresses resolved and shown once saved, masked by default behind an eye toggle.
 - **Host-key policies** — trust-on-first-use (TOFU) or strict verification against `known_hosts`.
+- **Bilingual UI and errors** — the panel follows the interface language, and backend error messages (auth failures, unreadable directories, oversized files, …) are returned in the same language.
 
 ## Installation
 

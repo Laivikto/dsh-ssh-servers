@@ -110,5 +110,19 @@
   "fsPreviewTruncated": "文件较大，仅显示前 1 MB",
   "fsExpand": "展开文件浏览",
   "fsCollapse": "收起文件浏览",
-  "fsConnectedBadge": "已连接"
+  "fsConnectedBadge": "已连接",
+  "fsDownloaded": "已下载 {name}（{size}）",
+  "kindDir": "目录",
+  "kindLink": "链接",
+  "kindFile": "文件",
+  "kindImage": "图片",
+  "kindBinary": "二进制",
+  "kindText": "文本",
+  "noSessionId": "新聊天没有返回会话 ID。",
+  "terminalKept": "终端已保留；可点「打开新聊天」进入对应聊天手动处理。",
+  "namePlaceholder": "生产主机",
+  "leaveEmpty": "可留空",
+  "ipv4": "IPv4",
+  "ipv6": "IPv6",
+  "ipv6Short": "IPv6"
 }

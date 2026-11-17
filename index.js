@@ -9,11 +9,12 @@
  */
 import { existsSync, statSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { readdir as readdirAsync } from 'node:fs/promises'
+import { readdir as readdirAsync, stat as statAsync } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { lookup } from 'node:dns/promises'
+import { Resolver } from 'node:dns/promises'
 import { isIP } from 'node:net'
 
 const API_ROOT = '/ssh-servers/api'
@@ -95,22 +96,22 @@ function mapConnectionState(data) {
  */
 async function listKeyCandidates(rawDir) {
   const dir = typeof rawDir === 'string' ? rawDir.trim() : ''
-  if (dir === '' || dir.length > 1024 || /[\0\r\n]/u.test(dir)) return { ok: false, code: 'invalid-dir', message: '目录无效。' }
-  if (!isAbsolute(dir)) return { ok: false, code: 'invalid-dir', message: '请提供绝对路径。' }
+  if (dir === '' || dir.length > 1024 || /[\0\r\n]/u.test(dir)) return { ok: false, code: 'invalid-dir', message: msg("目录无效。", "Invalid directory.") }
+  if (!isAbsolute(dir)) return { ok: false, code: 'invalid-dir', message: msg("请提供绝对路径。", "An absolute path is required.") }
   let st
   try {
-    st = statSync(dir)
+    st = await statAsync(dir)
   } catch {
-    return { ok: false, code: 'dir-missing', message: '目录不存在或无法访问。' }
+    return { ok: false, code: 'dir-missing', message: msg("目录不存在或无法访问。", "Directory does not exist or is not accessible.") }
   }
-  if (!st.isDirectory()) return { ok: false, code: 'not-a-dir', message: '该路径不是目录。' }
+  if (!st.isDirectory()) return { ok: false, code: 'not-a-dir', message: msg("该路径不是目录。", "The path is not a directory.") }
 
   let entries
   try {
     entries = await readdirAsync(dir, { withFileTypes: true })
   } catch (error) {
     const code = error && error.code === 'EACCES' ? 'permission-denied' : 'read-failed'
-    return { ok: false, code, message: '无法读取该目录。' }
+    return { ok: false, code, message: msg("无法读取该目录。", "Cannot read this directory.") }
   }
 
   const files = []
@@ -121,7 +122,7 @@ async function listKeyCandidates(rawDir) {
     if (skipHiddenFile(base)) continue
     const full = join(dir, base)
     let size = 0
-    try { size = statSync(full).size } catch { continue }
+    try { size = (await statAsync(full)).size } catch { continue }
     files.push({ name: base, path: full, size, likelyKey: classifyKeyFile(base) })
   }
   return { ok: true, dir, files: sortKeyCandidates(files) }
@@ -183,6 +184,31 @@ function isJsonObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+// ---------- 双语消息 ----------
+// 后端报错文案对用户可见（前端有 8 处直接展示 message），必须支持英文。
+// 语言来源：请求 body 的 lang 字段（前端注入）或请求头 Accept-Language。
+// 用 AsyncLocalStorage 做「请求级」隔离：多个请求并发时语言互不串扰。
+
+const langStore = new AsyncLocalStorage()
+
+/** 在当前请求上下文里设定语言（enterWith 只影响本异步上下文）。 */
+function setLang(lang) {
+  langStore.enterWith(String(lang).toLowerCase().startsWith('en') ? 'en' : 'zh')
+}
+
+/** 按当前请求语言取消息；未收录的文案回退中文。 */
+function msg(zh, en) {
+  return langStore.getStore() === 'en' ? en : zh
+}
+
+/** 从请求推断语言：body.lang 优先，Accept-Language 兜底。 */
+function langOf(body, req) {
+  const fromBody = typeof body?.lang === 'string' ? body.lang : ''
+  const fromHeader = req?.headers?.['accept-language'] ?? ''
+  const raw = fromBody || fromHeader
+  return String(raw).toLowerCase().startsWith('en') ? 'en' : 'zh'
+}
+
 function writeJson(res, status, body) {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -205,10 +231,55 @@ async function readJson(req) {
   if (text === '') return null
   try {
     const parsed = JSON.parse(text)
-    return isJsonObject(parsed) ? parsed : null
+    if (!isJsonObject(parsed)) return null
+    // 读取 body 时同步语言：之后本请求内的 msg() 调用自动使用该语言
+    setLang(langOf(parsed, req))
+    return parsed
   } catch {
     return null
   }
+}
+
+/**
+ * 统一的 POST 请求入口：方法校验 → 来源校验 → JSON 校验 → 读 body。
+ * 返回 `{ ok: true, body }`，或 `{ ok: false }`（响应已写完，调用方直接 return）。
+ * 12 个 handler 原先各自重复这 6–8 行样板，且只有 2 个检查了 Content-Type。
+ */
+async function readPostBody(ctx, req, res) {
+  if (req.method !== 'POST') {
+    writeJson(res, 405, { ok: false, code: 'method-not-allowed', message: msg('只接受 POST 请求。', 'POST requests only.') })
+    return { ok: false }
+  }
+  if (!guard(ctx, req, res)) return { ok: false }
+  const contentType = String(req.headers['content-type'] ?? '').toLowerCase()
+  if (!contentType.startsWith('application/json')) {
+    writeJson(res, 415, { ok: false, code: 'json-required', message: msg('请求必须是 JSON。', 'The request must be JSON.') })
+    return { ok: false }
+  }
+  let body
+  try {
+    body = await readJson(req)
+  } catch (error) {
+    // 只有「请求体超限」才该回 413；其余解析错误是 400，别一律当成过大。
+    const tooLarge = error instanceof Error && error.message === 'body-too-large'
+    writeJson(res, tooLarge ? 413 : 400, {
+      ok: false,
+      code: tooLarge ? 'body-too-large' : 'invalid-json',
+      message: tooLarge
+        ? msg('请求体过大。', 'Request body too large.')
+        : msg('请求体不是有效的 JSON。', 'The request body is not valid JSON.'),
+    })
+    return { ok: false }
+  }
+  if (body === null) {
+    writeJson(res, 400, {
+      ok: false,
+      code: 'invalid-json',
+      message: msg('请求体不是有效的 JSON。', 'The request body is not valid JSON.'),
+    })
+    return { ok: false }
+  }
+  return { ok: true, body }
 }
 
 /** DSH 浏览器认证优先；本机 loopback 同源作为桌面环境的后备。 */
@@ -238,7 +309,7 @@ function isTrustedRequest(ctx, req) {
 
 function guard(ctx, req, res) {
   if (isTrustedRequest(ctx, req)) return true
-  writeJson(res, 403, { ok: false, code: 'forbidden', message: '该请求不是来自本机 DSH 页面。' })
+  writeJson(res, 403, { ok: false, code: 'forbidden', message: msg("该请求不是来自本机 DSH 页面。", "This request is not from the local DSH page.") })
   return false
 }
 
@@ -409,7 +480,7 @@ async function waitForConnection(terminal, options, loginMark) {
     const passwordPrompt = /password(?:\s+for\s+[^:\n]+)?:\s*$/iu.test(lastLine) || /password:\s*$/iu.test(lastLine)
     if (passwordPrompt && !passwordSent) {
       if (options.password === undefined) {
-        return { ok: false, code: 'password-required', message: '服务器要求密码，但该配置没有保存密码。请在右侧终端中输入，或编辑配置后重试。' }
+        return { ok: false, code: 'password-required', message: msg("服务器要求密码，但该配置没有保存密码。请在右侧终端中输入，或编辑配置后重试。", "The server requires a password but none is saved. Enter it in the right terminal, or edit the profile and retry.") }
       }
       await terminal.write(options.password + '\r')
       passwordSent = true
@@ -419,7 +490,7 @@ async function waitForConnection(terminal, options, loginMark) {
     const passphrasePrompt = /Enter passphrase for key[^\n]*:\s*$/iu.test(lastLine)
     if (passphrasePrompt && !passphraseSent) {
       if (options.passphrase === undefined) {
-        return { ok: false, code: 'passphrase-required', message: '私钥需要口令，但该配置没有保存口令。请在右侧终端中输入，或编辑配置后重试。' }
+        return { ok: false, code: 'passphrase-required', message: msg("私钥需要口令，但该配置没有保存口令。请在右侧终端中输入，或编辑配置后重试。", "The private key needs a passphrase but none is saved. Enter it in the right terminal, or edit the profile and retry.") }
       }
       await terminal.write(options.passphrase + '\r')
       passphraseSent = true
@@ -427,10 +498,10 @@ async function waitForConnection(terminal, options, loginMark) {
       continue
     }
     if (passwordSent && /Permission denied/iu.test(transcript)) {
-      return { ok: false, code: 'auth-failed', message: '密码认证失败。请检查保存的密码，或手动在终端中登录。' }
+      return { ok: false, code: 'auth-failed', message: msg("密码认证失败。请检查保存的密码，或手动在终端中登录。", "Password authentication failed. Check the saved password, or log in manually in the terminal.") }
     }
     if (passphraseSent && /Permission denied/iu.test(transcript)) {
-      return { ok: false, code: 'auth-failed', message: '密钥或口令认证失败。请检查私钥路径和口令。' }
+      return { ok: false, code: 'auth-failed', message: msg("密钥或口令认证失败。请检查私钥路径和口令。", "Key or passphrase authentication failed. Check the key path and passphrase.") }
     }
     // VERBOSE 级别不再输出 "debug1: Entering interactive session."，
     // 登录成功只认 "Authenticated to ..."：PTY 与 shell 在此后即绪。
@@ -442,9 +513,9 @@ async function waitForConnection(terminal, options, loginMark) {
     await sleep(250)
   }
   if (passwordSent || passphraseSent) {
-    return { ok: false, code: 'connect-timeout', message: '已提交认证信息，但未在限定时间内看到 Shell 提示符。终端仍保留，可手动检查。' }
+    return { ok: false, code: 'connect-timeout', message: msg("已提交认证信息，但未在限定时间内看到 Shell 提示符。终端仍保留，可手动检查。", "Credentials were submitted but no shell prompt appeared in time. The terminal is kept for manual inspection.") }
   }
-  return { ok: false, code: 'connect-timeout', message: `未在 ${Math.round((Date.now() - startedAt) / 1000)} 秒内建立连接。终端仍保留，可手动检查。` }
+  return { ok: false, code: 'connect-timeout', message: msg(`未在 ${Math.round((Date.now() - startedAt) / 1000)} 秒内建立连接。终端仍保留，可手动检查。`, `Could not connect within ${Math.round((Date.now() - startedAt) / 1000)} seconds. The terminal is kept for manual inspection.`) }
 }
 
 async function resolveSessionAgent(ctx, sessionId) {
@@ -488,50 +559,46 @@ async function openSessionTerminal(ctx, agent, options) {
 }
 
 async function connectHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed', message: '只接受 POST。' })
-  if (!guard(ctx, req, res)) return
-  if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
-    return writeJson(res, 415, { ok: false, code: 'json-required', message: '请求必须是 JSON。' })
-  }
-  let body
-  try { body = await readJson(req) } catch (error) {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large', message: error instanceof Error ? error.message : '请求体过大。' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json', message: '请求 JSON 无效。' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
-  if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id', message: '服务器配置 ID 无效。' })
-  if (!SESSION_PATTERN.test(sessionId)) return writeJson(res, 400, { ok: false, code: 'invalid-session', message: '会话 ID 无效。' })
+  if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id', message: msg("服务器配置 ID 无效。", "Invalid server profile ID.") })
+  if (!SESSION_PATTERN.test(sessionId)) return writeJson(res, 400, { ok: false, code: 'invalid-session', message: msg("会话 ID 无效。", "Invalid session ID.") })
   if (connectLocks.has(sessionId)) {
-    return writeJson(res, 409, { ok: false, code: 'connect-busy', message: '该聊天已有连接正在进行，请等待完成。' })
+    return writeJson(res, 409, { ok: false, code: 'connect-busy', message: msg("该聊天已有连接正在进行，请等待完成。", "A connection is already in progress for this chat; wait for it to finish.") })
   }
   connectLocks.add(sessionId)
   try {
     const record = await readRecord(ctx, hostId)
     if (record === undefined) {
-      return writeJson(res, 409, { ok: false, code: 'credential-missing', message: '该服务器还没有保存连接配置，请先保存。' })
+      return writeJson(res, 409, { ok: false, code: 'credential-missing', message: msg("该服务器还没有保存连接配置，请先保存。", "No connection profile saved for this server. Save it first.") })
     }
     const requested = bindingOf(body)
     if (requested.host === undefined || requested.port === undefined || requested.username === undefined || requested.authMode === undefined) {
-      return writeJson(res, 400, { ok: false, code: 'invalid-binding', message: '连接目标参数无效。' })
+      return writeJson(res, 400, { ok: false, code: 'invalid-binding', message: msg("连接目标参数无效。", "Invalid connection target parameters.") })
     }
     if (!USER_PATTERN.test(requested.username)) {
-      return writeJson(res, 400, { ok: false, code: 'invalid-username', message: '用户名无效。' })
+      return writeJson(res, 400, { ok: false, code: 'invalid-username', message: msg("用户名无效。", "Invalid username.") })
     }
     const stored = bindingOf(record)
     if (!sameBinding(requested, stored)) {
-      return writeJson(res, 409, { ok: false, code: 'binding-mismatch', message: '连接目标与已保存的凭据绑定不一致。为防密码被发往其他主机，已拒绝连接；请重新保存服务器。' })
+      return writeJson(res, 409, { ok: false, code: 'binding-mismatch', message: msg("连接目标与已保存的凭据绑定不一致。为防密码被发往其他主机，已拒绝连接；请重新保存服务器。", "Target does not match the saved credential binding. Connection refused to prevent sending the password to another host; re-save the server.") })
     }
     if (requested.authMode === 'password' && (typeof record.password !== 'string' || record.password === '')) {
-      return writeJson(res, 409, { ok: false, code: 'password-required', message: '未找到已保存的密码。请编辑服务器并保存密码。' })
+      return writeJson(res, 409, { ok: false, code: 'password-required', message: msg("未找到已保存的密码。请编辑服务器并保存密码。", "No saved password found. Edit the server and save a password.") })
     }
     if (requested.authMode === 'key') {
       const keyPath = normalizeKeyPath(record.keyPath)
       if (keyPath === undefined) {
-        return writeJson(res, 409, { ok: false, code: 'key-path-invalid', message: '私钥路径无效。请填写绝对路径，例如 C:\\Users\\你\\.ssh\\id_ed25519。' })
+        return writeJson(res, 409, { ok: false, code: 'key-path-invalid', message: msg('私钥路径无效。请填写绝对路径，例如 C:\\Users\\你\\.ssh\\id_ed25519。', 'Invalid key path. Provide an absolute path, e.g. C:\\Users\\you\\.ssh\\id_ed25519.') })
       }
-      if (!existsSync(keyPath) || !statSync(keyPath).isFile()) {
-        return writeJson(res, 409, { ok: false, code: 'key-path-missing', message: '找不到该私钥文件。' })
+      // 异步 stat：避免在请求路径上阻塞事件循环（连接操作本来就在 async 上下文里）
+      let keyOk = false
+      try { keyOk = (await statAsync(keyPath)).isFile() } catch { keyOk = false }
+      if (!keyOk) {
+        return writeJson(res, 409, { ok: false, code: 'key-path-missing', message: msg("找不到该私钥文件。", "The private key file was not found.") })
       }
     }
     const agent = await resolveSessionAgent(ctx, sessionId)
@@ -635,29 +702,25 @@ async function connectHandler(ctx, req, res) {
 }
 
 async function disconnectHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try { body = await readJson(req) } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
   if (!SESSION_PATTERN.test(sessionId)) return writeJson(res, 400, { ok: false, code: 'invalid-session' })
   try {
     const agent = await resolveSessionAgent(ctx, sessionId)
     const connection = connections.get(String(agent.id))
-    if (connection === undefined) return writeJson(res, 404, { ok: false, code: 'not-connected', message: '该聊天没有已建立的 SSH 连接。' })
+    if (connection === undefined) return writeJson(res, 404, { ok: false, code: 'not-connected', message: msg("该聊天没有已建立的 SSH 连接。", "No established SSH connection for this chat.") })
     if (connection.terminal.info?.control !== 'agent') {
       dropConnection(agent.id, connection)
-      return writeJson(res, 409, { ok: false, code: 'user-control', message: '你已接管终端；连接工具已停用，请直接在终端中退出 ssh。' })
+      return writeJson(res, 409, { ok: false, code: 'user-control', message: msg("你已接管终端；连接工具已停用，请直接在终端中退出 ssh。", "You have taken over the terminal; connection tools are disabled. Exit ssh in the terminal directly.") })
     }
     dropConnection(agent.id, connection)
     try {
       await connection.terminal.close()
       return writeJson(res, 200, { ok: true })
     } catch (error) {
-      return writeJson(res, 409, { ok: false, code: 'cleanup-failed', message: `连接工具已停用，但终端清理失败：${error instanceof Error ? error.message : String(error)}。请在右侧关闭终端标签。` })
+      return writeJson(res, 409, { ok: false, code: 'cleanup-failed', message: msg(`连接工具已停用，但终端清理失败：${error instanceof Error ? error.message : String(error)}。请在右侧关闭终端标签。`, `Connection tools disabled, but terminal cleanup failed: ${error instanceof Error ? error.message : String(error)}. Close the terminal tab on the right.`) })
     }
   } catch (error) {
     return writeJson(res, 500, { ok: false, code: 'disconnect-failed', message: error instanceof Error ? error.message : String(error) })
@@ -665,13 +728,9 @@ async function disconnectHandler(ctx, req, res) {
 }
 
 async function closeTerminalHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try { body = await readJson(req) } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
   const terminalId = typeof body.terminalId === 'string' ? body.terminalId.trim() : ''
   if (!SESSION_PATTERN.test(sessionId) || terminalId === '' || terminalId.length > 128) {
@@ -681,7 +740,7 @@ async function closeTerminalHandler(ctx, req, res) {
     const agent = await resolveSessionAgent(ctx, sessionId)
     const terminalController = ctx.get('terminalController')
     if (terminalController === undefined || typeof terminalController.close !== 'function') {
-      return writeJson(res, 503, { ok: false, code: 'terminal-unavailable', message: '终端服务不可用。' })
+      return writeJson(res, 503, { ok: false, code: 'terminal-unavailable', message: msg("终端服务不可用。", "The terminal service is unavailable.") })
     }
     const connection = connections.get(String(agent.id))
     if (connection !== undefined && connection.terminal.id === terminalId) {
@@ -694,7 +753,7 @@ async function closeTerminalHandler(ctx, req, res) {
       }
       return writeJson(res, 200, { ok: true })
     } catch (error) {
-      return writeJson(res, 409, { ok: false, code: 'cleanup-failed', message: `终端清理失败：${error instanceof Error ? error.message : String(error)}。请在右侧关闭终端标签。` })
+      return writeJson(res, 409, { ok: false, code: 'cleanup-failed', message: msg(`终端清理失败：${error instanceof Error ? error.message : String(error)}。请在右侧关闭终端标签。`, `Terminal cleanup failed: ${error instanceof Error ? error.message : String(error)}. Close the terminal tab on the right.`) })
     }
   } catch (error) {
     return writeJson(res, 500, { ok: false, code: 'close-failed', message: error instanceof Error ? error.message : String(error) })
@@ -702,16 +761,9 @@ async function closeTerminalHandler(ctx, req, res) {
 }
 
 async function saveCredentialHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
-    return writeJson(res, 415, { ok: false, code: 'json-required' })
-  }
-  let body
-  try { body = await readJson(req) } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
   try {
@@ -721,22 +773,22 @@ async function saveCredentialHandler(ctx, req, res) {
     }
     const binding = bindingOf(body)
     if (binding.host === undefined || binding.port === undefined || binding.username === undefined || binding.authMode === undefined) {
-      return writeJson(res, 400, { ok: false, code: 'invalid-binding', message: '服务器地址、端口、用户名或认证方式无效。' })
+      return writeJson(res, 400, { ok: false, code: 'invalid-binding', message: msg("服务器地址、端口、用户名或认证方式无效。", "Invalid server address, port, username, or auth mode.") })
     }
     if (!USER_PATTERN.test(binding.username)) {
-      return writeJson(res, 400, { ok: false, code: 'invalid-username', message: '用户名只能包含字母、数字、点、下划线和连字符。' })
+      return writeJson(res, 400, { ok: false, code: 'invalid-username', message: msg("用户名只能包含字母、数字、点、下划线和连字符。", "Usernames may contain only letters, digits, dots, underscores, and hyphens.") })
     }
     const keyPath = normalizeKeyPath(body.keyPath)
     if (binding.authMode === 'key' && keyPath === undefined) {
-      return writeJson(res, 400, { ok: false, code: 'invalid-key-path', message: '使用私钥时必须填写绝对路径。' })
+      return writeJson(res, 400, { ok: false, code: 'invalid-key-path', message: msg("使用私钥时必须填写绝对路径。", "An absolute key path is required when using a private key.") })
     }
     const nextPassword = normalizeSecret(body.password)
     const nextPassphrase = normalizeSecret(body.passphrase)
     if (body.password !== undefined && body.password !== '' && nextPassword === undefined) {
-      return writeJson(res, 400, { ok: false, code: 'invalid-password', message: '密码不能包含换行或空字符。' })
+      return writeJson(res, 400, { ok: false, code: 'invalid-password', message: msg("密码不能包含换行或空字符。", "Passwords cannot contain newlines or null bytes.") })
     }
     if (body.passphrase !== undefined && body.passphrase !== '' && nextPassphrase === undefined) {
-      return writeJson(res, 400, { ok: false, code: 'invalid-passphrase', message: '口令不能包含换行或空字符。' })
+      return writeJson(res, 400, { ok: false, code: 'invalid-passphrase', message: msg("口令不能包含换行或空字符。", "Passphrases cannot contain newlines or null bytes.") })
     }
     const current = await readRecord(ctx, hostId)
     const currentBinding = current === undefined ? undefined : bindingOf(current)
@@ -757,13 +809,9 @@ async function saveCredentialHandler(ctx, req, res) {
 }
 
 async function credentialStatusHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try { body = await readJson(req) } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
   try {
@@ -776,13 +824,9 @@ async function credentialStatusHandler(ctx, req, res) {
 }
 
 async function deleteCredentialHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try { body = await readJson(req) } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
   try {
@@ -1040,47 +1084,64 @@ function normalizeRemotePath(value) {
 }
 
 /**
+ * 为 fs-* 三个 handler 解析执行目标：读凭据 → 构造 exec target。
+ * 成功返回 `{ ok: true, target }`；失败返回 `{ ok: false }`（响应已写完）。
+ * 原先三个 handler 各自复制同一段 20 行代码。
+ */
+async function resolveFsTarget(ctx, res, hostId) {
+  let record
+  try {
+    record = await readRecord(ctx, hostId)
+  } catch {
+    writeJson(res, 500, {
+      ok: false,
+      code: 'credential-read-failed',
+      message: msg('读取本机凭据失败。', 'Failed to read local credentials.'),
+    })
+    return { ok: false }
+  }
+  if (record === undefined) {
+    writeJson(res, 409, {
+      ok: false,
+      code: 'no-credential',
+      message: msg('该主机还没有保存连接凭据。', 'No connection credentials have been saved for this host.'),
+    })
+    return { ok: false }
+  }
+  const target = buildExecTarget(record)
+  if (target === undefined) {
+    writeJson(res, 409, {
+      ok: false,
+      code: 'credential-incomplete',
+      message: record.authMode === 'password'
+        ? msg('密码认证暂不支持后台浏览，请改用密钥或保持终端连接。', 'Background browsing is unavailable for password auth; use a key or keep the terminal connected.')
+        : msg('凭据不完整或私钥不可读。', 'Credentials are incomplete or the private key is unreadable.'),
+    })
+    return { ok: false }
+  }
+  return { ok: true, target }
+}
+
+/**
  * 列出远端目录。
  * 先探测目录可读性再分支：GNU find 用 -printf 拿结构化字段，
  * BusyBox/BSD/macOS 退回朴素 ls -la。
  */
 async function fsListHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try {
-    body = await readJson(req)
-  } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
 
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
 
   const dir = normalizeRemotePath(body.path ?? '/')
-  if (dir === undefined) return writeJson(res, 400, { ok: false, code: 'invalid-path', message: '目录路径无效。' })
+  if (dir === undefined) return writeJson(res, 400, { ok: false, code: 'invalid-path', message: msg("目录路径无效。", "Invalid directory path.") })
 
   // 解析执行目标：优先用保存的凭据（不依赖终端是否已连接）
-  let record
-  try {
-    record = await readRecord(ctx, hostId)
-  } catch {
-    return writeJson(res, 500, { ok: false, code: 'credential-read-failed', message: '读取本机凭据失败。' })
-  }
-  if (record === undefined) {
-    return writeJson(res, 409, { ok: false, code: 'no-credential', message: '该主机还没有保存连接凭据。' })
-  }
-  const target = buildExecTarget(record)
-  if (target === undefined) {
-    return writeJson(res, 409, {
-      ok: false,
-      code: 'credential-incomplete',
-      message: record.authMode === 'password'
-        ? '密码认证暂不支持后台浏览，请改用密钥或保持终端连接。'
-        : '凭据不完整或私钥不可读。',
-    })
-  }
+  const resolved = await resolveFsTarget(ctx, res, hostId)
+  if (!resolved.ok) return
+  const target = resolved.target
 
   try {
     // 走独立 exec 通道：不写终端、不产生回显
@@ -1099,10 +1160,10 @@ async function fsListHandler(ctx, req, res) {
     const probeRaw = await execRemote(target, probeCmd, { timeoutMs: 15_000 })
     const probeLines = extractMarkedLines(probeRaw, FS_BEGIN, FS_END)
     if (probeLines === null) {
-      return writeJson(res, 500, { ok: false, code: 'list-failed', message: '无法探测远端目录状态。' })
+      return writeJson(res, 500, { ok: false, code: 'list-failed', message: msg("无法探测远端目录状态。", "Could not probe the remote directory state.") })
     }
     if (probeLines.includes('__ERR__')) {
-      return writeJson(res, 404, { ok: false, code: 'dir-unreadable', message: '目录不存在或没有读取权限。' })
+      return writeJson(res, 404, { ok: false, code: 'dir-unreadable', message: msg("目录不存在或没有读取权限。", "The directory does not exist or is not readable.") })
     }
     const isGnu = probeLines.includes('__GNU__')
 
@@ -1120,7 +1181,7 @@ async function fsListHandler(ctx, req, res) {
     }
 
     if (entries === null) {
-      return writeJson(res, 500, { ok: false, code: 'list-failed', message: '无法解析目录列表。' })
+      return writeJson(res, 500, { ok: false, code: 'list-failed', message: msg("无法解析目录列表。", "Could not parse the directory listing.") })
     }
 
     return writeJson(res, 200, {
@@ -1256,64 +1317,56 @@ function hexView(bytes, maxBytes = 65536) {
 }
 
 async function fsPreviewHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try {
-    body = await readJson(req)
-  } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
 
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
 
   const filePath = normalizeRemotePath(body.path)
   if (filePath === undefined || filePath === '/') {
-    return writeJson(res, 400, { ok: false, code: 'invalid-path', message: '文件路径无效。' })
+    return writeJson(res, 400, { ok: false, code: 'invalid-path', message: msg("文件路径无效。", "Invalid file path.") })
   }
 
-  let record
-  try {
-    record = await readRecord(ctx, hostId)
-  } catch {
-    return writeJson(res, 500, { ok: false, code: 'credential-read-failed', message: '读取本机凭据失败。' })
-  }
-  if (record === undefined) {
-    return writeJson(res, 409, { ok: false, code: 'no-credential', message: '该主机还没有保存连接凭据。' })
-  }
-  const target = buildExecTarget(record)
-  if (target === undefined) {
-    return writeJson(res, 409, { ok: false, code: 'credential-incomplete', message: '凭据不完整或私钥不可读。' })
-  }
+  const resolved = await resolveFsTarget(ctx, res, hostId)
+  if (!resolved.ok) return
+  const target = resolved.target
 
   try {
-    // 先看大小，决定读取策略
+    // 一次远端往返完成「取大小/权限 + 读内容」：
+    // 以前是 statCmd（15s）+ b64Cmd（30s）两次 ssh 进程，延迟翻倍。
     // 优先 GNU stat；BusyBox/BSD 上 -c 不可用时退回 wc -c，避免把存在的文件误报为不存在。
     const quoted = posixQuote(filePath)
-    const statCmd =
-      `v=$(stat -c '%s %a' ${quoted} 2>/dev/null); ` +
-      `if [ -n "$v" ]; then echo "$v"; ` +
-      `else n=$(wc -c < ${quoted} 2>/dev/null || echo -1); echo "$n -"; fi`
-    const statRaw = await execRemote(target, statCmd, { timeoutMs: 15_000 })
-    const statLine = String(statRaw).trim().split('\n').pop() ?? '-1 -'
-    const [sizeText, mode] = statLine.split(' ')
-    const size = Number(sizeText)
+    const probeCmd = [
+      `v=$(stat -c '%s %a' ${quoted} 2>/dev/null)`,
+      `[ -z "$v" ] && v="$(wc -c < ${quoted} 2>/dev/null || echo -1) -"`,
+      's="${v%% *}"',
+      'm="${v##* }"',
+      'echo "STAT $s $m"',
+      `lim=$s; [ "$lim" -gt ${FS_PREVIEW_MAX} ] && lim=${FS_PREVIEW_MAX}`,
+      '[ "$lim" -lt 0 ] && lim=0',
+      `head -c "$lim" ${quoted} 2>/dev/null | base64 2>/dev/null | tr -d '\\n'`,
+    ].join('; ')
+    const probeRaw = String(await execRemote(target, probeCmd, { timeoutMs: 30_000 }) ?? '')
+    // 首行是 STAT 头，其余是 base64 内容
+    const newlineAt = probeRaw.indexOf('\n')
+    const statLine = (newlineAt >= 0 ? probeRaw.slice(0, newlineAt) : probeRaw).trim()
+    const b64Raw = newlineAt >= 0 ? probeRaw.slice(newlineAt + 1) : ''
+    const statMatch = /^STAT (-?\d+) (\S+)$/u.exec(statLine)
+    if (statMatch === null) {
+      return writeJson(res, 500, { ok: false, code: 'read-failed', message: msg('读取文件内容失败。', 'Failed to read the file contents.') })
+    }
+    const size = Number(statMatch[1])
+    const mode = statMatch[2]
     if (!Number.isFinite(size) || size < 0) {
-      return writeJson(res, 404, { ok: false, code: 'not-found', message: '文件不存在或无法读取。' })
+      return writeJson(res, 404, { ok: false, code: 'not-found', message: msg('文件不存在或无法读取。', 'The file does not exist or cannot be read.') })
     }
 
-    const readLimit = Math.min(size, FS_PREVIEW_MAX)
     const truncated = size > FS_PREVIEW_MAX
-
-    // 用 base64 传输，避免二进制/编码破坏
-    // tr -d '\n' 兼容 GNU/BSD/busybox，base64 -w0 只有 GNU 支持
-    const b64Cmd = `head -c ${readLimit} ${posixQuote(filePath)} 2>/dev/null | base64 2>/dev/null | tr -d '\\n'`
-    const b64Raw = String(await execRemote(target, b64Cmd, { timeoutMs: 30_000 }) ?? '')
     const cleaned = b64Raw.replace(/[^A-Za-z0-9+/=]/g, '')
     if (cleaned === '' && size > 0) {
-      return writeJson(res, 500, { ok: false, code: 'read-failed', message: '读取文件内容失败。' })
+      return writeJson(res, 500, { ok: false, code: 'read-failed', message: msg("读取文件内容失败。", "Failed to read the file contents.") })
     }
 
     const buffer = Buffer.from(cleaned, 'base64')
@@ -1361,88 +1414,84 @@ async function fsPreviewHandler(ctx, req, res) {
   }
 }
 
-async function fsDownloadHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try {
-    body = await readJson(req)
-  } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
+/**
+ * 从远端读取整个文件到 Buffer，含上限检查与大小一致性校验。
+ * 成功返回 `{ ok: true, buffer, size }`；失败返回 `{ ok: false }`（响应已写完）。
+ * JSON 接口与二进制接口共用，避免两处各写一遍校验逻辑。
+ */
+async function readRemoteFile(res, target, filePath) {
+  // 先查大小，避免把超大文件读进内存；GNU stat 不可用时退回 wc -c
+  const sizeCmd = `v=$(stat -c %s ${posixQuote(filePath)} 2>/dev/null); ` +
+    `if [ -n "$v" ]; then echo "$v"; else wc -c < ${posixQuote(filePath)} 2>/dev/null || echo -1; fi`
+  const sizeRaw = await execRemote(target, sizeCmd, { timeoutMs: 20_000 })
+  const size = Number(String(sizeRaw).trim().split('\n').pop())
+  if (!Number.isFinite(size) || size < 0) {
+    writeJson(res, 404, { ok: false, code: 'not-found', message: msg('文件不存在或无法读取。', 'The file does not exist or cannot be read.') })
+    return { ok: false }
   }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  if (size > FS_MAX_DOWNLOAD) {
+    writeJson(res, 413, {
+      ok: false,
+      code: 'too-large',
+      message: msg(`文件 ${(size / 1024 / 1024).toFixed(1)} MB，超过 ${FS_MAX_DOWNLOAD / 1024 / 1024} MB 上限。`, `File is ${(size / 1024 / 1024).toFixed(1)} MB, over the ${FS_MAX_DOWNLOAD / 1024 / 1024} MB limit.`),
+      size,
+    })
+    return { ok: false }
+  }
+
+  const b64Cmd = `base64 ${posixQuote(filePath)} 2>/dev/null | tr -d '\\n' | head -c ${Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 1024}`
+  // base64 后体积约为原文的 4/3，必须显式抬高通道上限，
+  // 否则超过约 3 MB 的文件会被 execRemote 的默认 4 MB 上限拒绝。
+  const b64Raw = await execRemote(target, b64Cmd, {
+    timeoutMs: 60_000,
+    maxBytes: Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 64 * 1024,
+  })
+  const cleaned = String(b64Raw ?? '').replace(/[^A-Za-z0-9+/=]/g, '')
+  // 0 字节文件的 base64 本就是空串，不能当失败
+  if (cleaned === '' && size > 0) {
+    writeJson(res, 500, { ok: false, code: 'read-failed', message: msg('读取文件内容失败。', 'Failed to read the file contents.') })
+    return { ok: false }
+  }
+  const buffer = Buffer.from(cleaned, 'base64')
+  // 校验解出的字节数：文件在 stat 与读取之间被改写时长度会不符
+  if (size <= FS_MAX_DOWNLOAD && buffer.length !== size) {
+    writeJson(res, 500, {
+      ok: false,
+      code: 'size-mismatch',
+      message: msg(`读取到 ${buffer.length} 字节，与预期的 ${size} 字节不一致（文件可能正在被修改）。`, `Read ${buffer.length} bytes but expected ${size} (the file may be changing).`),
+    })
+    return { ok: false }
+  }
+  return { ok: true, buffer, size }
+}
+
+async function fsDownloadHandler(ctx, req, res) {
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
 
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
 
   const filePath = normalizeRemotePath(body.path)
   if (filePath === undefined || filePath === '/') {
-    return writeJson(res, 400, { ok: false, code: 'invalid-path', message: '文件路径无效。' })
+    return writeJson(res, 400, { ok: false, code: 'invalid-path', message: msg('文件路径无效。', 'Invalid file path.') })
   }
 
   // 与 fs-list / fs-preview 一致：优先用保存的凭据建立独立执行通道，
   // 不要求终端处于连接状态（避免下载功能依赖终端存活）。
-  let record
-  try {
-    record = await readRecord(ctx, hostId)
-  } catch {
-    return writeJson(res, 500, { ok: false, code: 'credential-read-failed', message: '读取本机凭据失败。' })
-  }
-  if (record === undefined) {
-    return writeJson(res, 409, { ok: false, code: 'no-credential', message: '该主机还没有保存连接凭据。' })
-  }
-  const target = buildExecTarget(record)
-  if (target === undefined) {
-    return writeJson(res, 409, { ok: false, code: 'credential-incomplete', message: '凭据不完整或私钥不可读。' })
-  }
+  const resolved = await resolveFsTarget(ctx, res, hostId)
+  if (!resolved.ok) return
+  const target = resolved.target
 
   try {
-    // 先查大小，避免把超大文件读进内存
-    // 与 preview 一致：GNU stat 不可用时退回 wc -c
-    const sizeCmd = `v=$(stat -c %s ${posixQuote(filePath)} 2>/dev/null); ` +
-      `if [ -n "$v" ]; then echo "$v"; else wc -c < ${posixQuote(filePath)} 2>/dev/null || echo -1; fi`
-    const sizeRaw = await execRemote(target, sizeCmd, { timeoutMs: 20_000 })
-    const size = Number(String(sizeRaw).trim().split('\n').pop())
-    if (!Number.isFinite(size) || size < 0) {
-      return writeJson(res, 404, { ok: false, code: 'not-found', message: '文件不存在或无法读取。' })
-    }
-    if (size > FS_MAX_DOWNLOAD) {
-      return writeJson(res, 413, {
-        ok: false,
-        code: 'too-large',
-        message: `文件 ${(size / 1024 / 1024).toFixed(1)} MB，超过 ${FS_MAX_DOWNLOAD / 1024 / 1024} MB 上限。`,
-        size,
-      })
-    }
-
-    const b64Cmd = `base64 ${posixQuote(filePath)} 2>/dev/null | tr -d '\\n' | head -c ${Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 1024}`
-    // base64 后体积约为原文的 4/3，必须显式抬高通道上限，
-    // 否则超过约 3 MB 的文件会被 execRemote 的默认 4 MB 上限拒绝。
-    const b64Raw = await execRemote(target, b64Cmd, {
-      timeoutMs: 60_000,
-      maxBytes: Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 64 * 1024,
-    })
-    const cleaned = String(b64Raw ?? '').replace(/[^A-Za-z0-9+/=]/g, '')
-    // 0 字节文件的 base64 本就是空串，不能当失败
-    if (cleaned === '' && size > 0) {
-      return writeJson(res, 500, { ok: false, code: 'read-failed', message: '读取文件内容失败。' })
-    }
-
-    // 校验解出的字节数：文件在 stat 与读取之间被改写时长度会不符
-    const decodedLength = Buffer.from(cleaned, 'base64').length
-    if (size <= FS_MAX_DOWNLOAD && decodedLength !== size) {
-      return writeJson(res, 500, {
-        ok: false,
-        code: 'size-mismatch',
-        message: `读取到 ${decodedLength} 字节，与预期的 ${size} 字节不一致（文件可能正在被修改）。`,
-      })
-    }
-
+    const file = await readRemoteFile(res, target, filePath)
+    if (!file.ok) return
     return writeJson(res, 200, {
       ok: true,
       path: filePath,
-      size,
-      base64: cleaned,
+      size: file.size,
+      base64: file.buffer.toString('base64'),
       name: filePath.split('/').pop() ?? 'download',
     })
   } catch (error) {
@@ -1454,16 +1503,87 @@ async function fsDownloadHandler(ctx, req, res) {
   }
 }
 
-async function connectionStateHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try {
-    body = await readJson(req)
-  } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
+/**
+ * 二进制下载：直接把文件字节作为响应体。
+ * 相比 JSON+base64 省掉 33% 的体积膨胀和一次大字符串解析。
+ * 失败时仍返回 JSON（前端按 content-type 区分）。
+ */
+async function fsDownloadRawHandler(ctx, req, res) {
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
+
+  const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
+  if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
+
+  const filePath = normalizeRemotePath(body.path)
+  if (filePath === undefined || filePath === '/') {
+    return writeJson(res, 400, { ok: false, code: 'invalid-path', message: msg('文件路径无效。', 'Invalid file path.') })
   }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+
+  const resolved = await resolveFsTarget(ctx, res, hostId)
+  if (!resolved.ok) return
+  const target = resolved.target
+
+  try {
+    const file = await readRemoteFile(res, target, filePath)
+    if (!file.ok) return
+    const name = filePath.split('/').pop() ?? 'download'
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': String(file.buffer.length),
+      'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'cache-control': 'no-store',
+      'x-dsh-ssh-filename': encodeURIComponent(name),
+    })
+    res.end(file.buffer)
+  } catch (error) {
+    return writeJson(res, 500, {
+      ok: false,
+      code: 'download-failed',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/**
+ * 判定一台主机的当前连接状态（纯计算，不写响应）。
+ * 单主机接口与批量心跳共用，避免两套逻辑漂移。
+ */
+function connectionStateOf(hostId) {
+  let target = null
+  for (const connection of connections.values()) {
+    if (connection.hostId === hostId) { target = connection; break }
+  }
+  if (target === null) {
+    return { connected: false, alive: false, reason: 'not-connected' }
+  }
+  const terminalState = target.terminal?.info?.state
+  if (terminalState !== undefined && terminalState !== 'running') {
+    return { connected: false, alive: false, reason: 'terminal-exited', terminalState, connectedAt: target.connectedAt }
+  }
+  // 屏幕文本里出现 SSH 断线特征 → 判定为断开
+  if (DISCONNECT_PATTERN.test(readScreenText(target.terminal, 80))) {
+    return { connected: false, alive: false, reason: 'disconnected', terminalState, connectedAt: target.connectedAt }
+  }
+  return { connected: true, alive: true, reason: 'alive', terminalState, connectedAt: target.connectedAt }
+}
+
+async function connectionStateHandler(ctx, req, res) {
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
+
+  // 批量心跳：一次请求返回多台主机的状态，替代前端逐个串行请求
+  if (Array.isArray(body.hostIds)) {
+    const states = {}
+    for (const raw of body.hostIds.slice(0, 50)) {
+      const id = typeof raw === 'string' ? raw.trim() : ''
+      if (!ID_PATTERN.test(id)) continue
+      states[id] = connectionStateOf(id)
+    }
+    return writeJson(res, 200, { ok: true, states })
+  }
 
   // 诊断：列出全部连接
   if (body.list === true) {
@@ -1483,62 +1603,21 @@ async function connectionStateHandler(ctx, req, res) {
 
   const hostId = typeof body.hostId === 'string' ? body.hostId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
-
-  let target = null
-  for (const connection of connections.values()) {
-    if (connection.hostId === hostId) { target = connection; break }
-  }
-
-  if (target === null) {
-    return writeJson(res, 200, { ok: true, connected: false, alive: false, reason: 'not-connected' })
-  }
-
-  const terminalState = target.terminal?.info?.state
-  if (terminalState !== undefined && terminalState !== 'running') {
-    return writeJson(res, 200, {
-      ok: true, connected: false, alive: false, reason: 'terminal-exited', terminalState,
-      connectedAt: target.connectedAt,
-    })
-  }
-
-  // 屏幕文本里出现 SSH 断线特征 → 判定为断开
-  const screen = readScreenText(target.terminal, 80)
-  const DISCONNECT = DISCONNECT_PATTERN
-  if (DISCONNECT.test(screen)) {
-    return writeJson(res, 200, {
-      ok: true, connected: false, alive: false, reason: 'disconnected', terminalState,
-      connectedAt: target.connectedAt,
-    })
-  }
-
-  return writeJson(res, 200, {
-    ok: true, connected: true, alive: true, reason: 'alive', terminalState,
-    connectedAt: target.connectedAt,
-  })
+  return writeJson(res, 200, { ok: true, ...connectionStateOf(hostId) })
 }
 
 async function listKeysHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try {
-    body = await readJson(req)
-  } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large', message: '请求体过大。' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json', message: '请求 JSON 无效。' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const result = await listKeyCandidates(body.dir)
   return writeJson(res, result.ok ? 200 : 400, result)
 }
 
 async function resolveHandler(ctx, req, res) {
-  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
-  if (!guard(ctx, req, res)) return
-  let body
-  try { body = await readJson(req) } catch {
-    return writeJson(res, 413, { ok: false, code: 'body-too-large' })
-  }
-  if (body === null) return writeJson(res, 400, { ok: false, code: 'invalid-json' })
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const body = parsed.body
   const host = normalizeHost(body.host)
   if (host === undefined) return writeJson(res, 400, { ok: false, code: 'invalid-host' })
   const result = { ok: true, ipv4: [], ipv6: [] }
@@ -1546,14 +1625,19 @@ async function resolveHandler(ctx, req, res) {
   if (literal === 4) result.ipv4.push(host)
   else if (literal === 6) result.ipv6.push(host)
   else {
+    // 用带超时/重试的 Resolver 代替 lookup + Promise.race：
+    // lookup 不受 race 约束，超时后底层查询仍会挂着（并发多了会堆积）。
     try {
-      const addresses = await Promise.race([
-        lookup(host, { all: true, verbatim: true }),
-        sleep(5000).then(() => []),
+      const resolver = new Resolver({ timeout: 4000, tries: 1 })
+      const [v4, v6] = await Promise.allSettled([
+        resolver.resolve4(host),
+        resolver.resolve6(host),
       ])
-      for (const address of addresses) {
-        if (address.family === 4 && !result.ipv4.includes(address.address)) result.ipv4.push(address.address)
-        if (address.family === 6 && !result.ipv6.includes(address.address)) result.ipv6.push(address.address)
+      if (v4.status === 'fulfilled') {
+        for (const address of v4.value) if (!result.ipv4.includes(address)) result.ipv4.push(address)
+      }
+      if (v6.status === 'fulfilled') {
+        for (const address of v6.value) if (!result.ipv6.includes(address)) result.ipv6.push(address)
       }
     } catch {
       // 无法解析时仍返回空列表，界面显示“未解析”。
@@ -1773,13 +1857,16 @@ export function apply(ctx) {
     { path: `${API_ROOT}/connection-state`, handler: (req, res) => connectionStateHandler(ctx, req, res) },
     { path: `${API_ROOT}/fs-list`, handler: (req, res) => fsListHandler(ctx, req, res) },
     { path: `${API_ROOT}/fs-download`, handler: (req, res) => fsDownloadHandler(ctx, req, res) },
+    { path: `${API_ROOT}/fs-download-raw`, handler: (req, res) => fsDownloadRawHandler(ctx, req, res) },
     { path: `${API_ROOT}/fs-preview`, handler: (req, res) => fsPreviewHandler(ctx, req, res) },
   ]
   for (const route of routes) {
     ctx.effect(() => ctx.webServer.register({
       kind: 'exact',
       path: route.path,
-      handler: route.handler,
+      // 每个请求在独立的语言上下文里执行：先按 Accept-Language 定初值，
+      // readJson 拿到 body.lang 后再用 enterWith 覆盖（只影响本请求）。
+      handler: (req, res) => langStore.run(langOf(null, req), () => route.handler(req, res)),
     }), `ssh-servers: route ${route.path}`)
   }
   const tools = ctx.get('tools')
@@ -1809,6 +1896,10 @@ export function apply(ctx) {
 /** 供测试使用的纯函数。 */
 export const __test__ = {
   buildSshCommand,
+  msg,
+  setLang,
+  langOf,
+  langStore,
   psQuote,
   posixQuote,
   bindingOf,

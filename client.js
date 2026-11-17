@@ -122,6 +122,20 @@ window.__ModuleLoader__.load({
       fsPreviewLoading: '读取中…',
       fsPreviewClose: '关闭',
       fsPreviewTruncated: '文件较大，仅显示前 1 MB',
+      fsExpand: '展开文件浏览',
+      fsCollapse: '收起文件浏览',
+      fsConnectedBadge: '已连接',
+      fsDownloaded: '已下载 {name}（{size}）',
+      kindDir: '目录',
+      kindLink: '链接',
+      kindFile: '文件',
+      kindImage: '图片',
+      kindBinary: '二进制',
+      kindText: '文本',
+      noSessionId: '新聊天没有返回会话 ID。',
+      terminalKept: '终端已保留；可点「打开新聊天」进入对应聊天手动处理。',
+      namePlaceholder: '生产主机',
+      leaveEmpty: '可留空',
     }
 
     const en = {
@@ -233,6 +247,20 @@ window.__ModuleLoader__.load({
       fsPreviewLoading: 'Loading…',
       fsPreviewClose: 'Close',
       fsPreviewTruncated: 'File is large — showing the first 1 MB',
+      fsExpand: 'Show files',
+      fsCollapse: 'Hide files',
+      fsConnectedBadge: 'Connected',
+      fsDownloaded: 'Downloaded {name} ({size})',
+      kindDir: 'Folder',
+      kindLink: 'Link',
+      kindFile: 'File',
+      kindImage: 'Image',
+      kindBinary: 'Binary',
+      kindText: 'Text',
+      noSessionId: 'The new chat did not return a session ID.',
+      terminalKept: 'The terminal is kept; click "Open new chat" to handle it manually.',
+      namePlaceholder: 'Production server',
+      leaveEmpty: 'Can be left empty',
     }
 
     const CSS = `
@@ -350,6 +378,7 @@ window.__ModuleLoader__.load({
       .dsh-ssh-header-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:7px;height:28px;display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;padding:0 8px;font:inherit;font-size:11px;font-weight:600;letter-spacing:.02em;line-height:1;white-space:nowrap}
       .dsh-ssh-header-btn:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
       .dsh-ssh-header-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+      .dsh-ssh-header-btn svg{flex:0 0 auto;display:block}
       @container (max-width:340px){.dsh-ssh-grid2{grid-template-columns:1fr}}
     `
 
@@ -369,12 +398,16 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 当前界面语言，供所有 API 请求随 body 带给后端（后端据此返回对应语言的报错文案）。
+    // apply() 时绑定到 ctx.locale，并订阅切换。
+    let apiLang = 'zh'
+
     async function api(name, body) {
       const response = await fetch(apiUrl(name), {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body ?? {}),
+        body: JSON.stringify({ ...(body ?? {}), lang: apiLang }),
       })
       let data = null
       try { data = await response.json() } catch { /* 非 JSON 响应。 */ }
@@ -590,58 +623,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
 危险操作（删除文件、改系统配置、重启关机、升级内核等）动手前先说清楚会做什么、有什么风险、怎么回滚，等我确认后再执行；其他日常命令可以直接跑。`
     }
 
-    function text(t, key, fallback) {
-      try {
-        const value = t(key)
-        return typeof value === 'string' && value !== '' && value !== key ? value : fallback
-      } catch {
-        return fallback
-      }
-    }
-
-    return {
-      inject: ['slots', 'locale', 'sessions', 'conversation', 'uiWorkspace', 'sidebarRight', 'sidebarRightTabs'],
-      apply(ctx) {
-        const t = ctx.locale.bind(NS)
-        ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ssh-servers: locale')
-
-        const openPanel = () => {
-          try {
-            ctx.sidebarRight.openTab(TAB_KIND)
-          } catch (error) {
-            console.error('ssh-servers: open panel failed', error)
-          }
-        }
-
-        /**
-         * 把 SSH 服务面板切到最前。
-         * openTab 只作用于「屏幕上挂载的会话」，所以调用时机很关键：
-         * 连接时新建的会话尚未挂载，此时调用会写到旧会话的侧栏上（用户看不到）。
-         * 因此这里延后到下一帧再试，并允许调用方重复尝试。
-         */
-        const revealPanel = (attempt = 0) => {
-          try {
-            ctx.sidebarRight.openTab(TAB_KIND)
-            return
-          } catch { /* 会话尚未挂载，稍后重试 */ }
-          if (attempt >= 6) return
-          setTimeout(() => revealPanel(attempt + 1), 120 * (attempt + 1))
-        }
-
-        function HeaderButton() {
-          const label = text(t, 'openPanel', '打开 SSH 服务')
-          return h(React.Fragment, null,
-            h('style', null, `.dsh-ssh-header-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:7px;height:28px;display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;padding:0 8px;font:inherit;font-size:11px;font-weight:600;letter-spacing:.02em;line-height:1;white-space:nowrap}.dsh-ssh-header-btn:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}.dsh-ssh-header-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.dsh-ssh-header-btn svg{flex:0 0 auto;display:block}`),
-            h('button', {
-              type: 'button', className: 'dsh-ssh-header-btn', title: label, 'aria-label': label,
-              onClick: openPanel,
-            },
-              h(SshIcon, { size: 16 }),
-              h('span', { className: 'dsh-ssh-header-text' }, 'SSH'),
-            ),
-          )
-        }
-
     // ---------------- 文件浏览器 ----------------
 
     /** 隐藏 IP 的后半段，只保留第一个点之前的部分。 */
@@ -683,14 +664,88 @@ For destructive operations (deleting files, changing system config, reboot/shutd
     }
 
     /** 由文件名推断类型标签。 */
-    function fileKindLabel(entry) {
-      if (entry.type === 'dir') return '目录'
-      if (entry.type === 'link') return '链接'
+    function fileKindLabel(entry, tt) {
+      const t = tt ?? ((k, d) => d ?? k)
+      if (entry.type === 'dir') return text(t, 'kindDir', '目录')
+      if (entry.type === 'link') return text(t, 'kindLink', '链接')
       const name = entry.name ?? ''
       const dot = name.lastIndexOf('.')
       if (dot > 0 && dot < name.length - 1) return name.slice(dot + 1).toLowerCase()
-      return '文件'
+      return text(t, 'kindFile', '文件')
     }
+
+    function text(t, key, fallback) {
+      try {
+        const value = t(key)
+        return typeof value === 'string' && value !== '' && value !== key ? value : fallback
+      } catch {
+        return fallback
+      }
+    }
+
+    return {
+      inject: ['slots', 'locale', 'sessions', 'conversation', 'uiWorkspace', 'sidebarRight', 'sidebarRightTabs'],
+      // 纯函数出口：仅供单元测试加载真实实现，宿主加载器只读 inject/apply。
+      __test__: { humanSize, formatTime, fileKindLabel, maskAddress },
+      apply(ctx) {
+        const t = ctx.locale.bind(NS)
+        ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ssh-servers: locale')
+
+        // 语言同步：让后端按界面语言返回报错文案
+        const syncLang = () => {
+          try {
+            const active = String(ctx.locale.getLocale()?.active ?? 'zh')
+            apiLang = active.toLowerCase().startsWith('en') ? 'en' : 'zh'
+          } catch { apiLang = 'zh' }
+        }
+        syncLang()
+        ctx.effect(() => ctx.locale.subscribe(syncLang), 'ssh-servers: api language')
+
+        // 样式一次性注入 <head>：以前每个组件每次渲染都塞一份 <style>，
+        // 面板刷新时会不断产生重复样式节点。
+        ctx.effect(() => {
+          if (typeof document === 'undefined') return undefined
+          const styleEl = document.createElement('style')
+          styleEl.setAttribute('data-dsh-ssh-servers', '')
+          styleEl.textContent = CSS
+          document.head.appendChild(styleEl)
+          return () => { styleEl.remove() }
+        }, 'ssh-servers: global style')
+
+        const openPanel = () => {
+          try {
+            ctx.sidebarRight.openTab(TAB_KIND)
+          } catch (error) {
+            console.error('ssh-servers: open panel failed', error)
+          }
+        }
+
+        /**
+         * 把 SSH 服务面板切到最前。
+         * openTab 只作用于「屏幕上挂载的会话」，所以调用时机很关键：
+         * 连接时新建的会话尚未挂载，此时调用会写到旧会话的侧栏上（用户看不到）。
+         * 因此这里延后到下一帧再试，并允许调用方重复尝试。
+         */
+        const revealPanel = (attempt = 0) => {
+          try {
+            ctx.sidebarRight.openTab(TAB_KIND)
+            return
+          } catch { /* 会话尚未挂载，稍后重试 */ }
+          if (attempt >= 6) return
+          setTimeout(() => revealPanel(attempt + 1), 120 * (attempt + 1))
+        }
+
+        function HeaderButton() {
+          const label = text(t, 'openPanel', '打开 SSH 服务')
+          // 样式由 apply() 一次性注入到 <head>，组件内不再重复插入 <style>
+          return h('button', {
+            type: 'button', className: 'dsh-ssh-header-btn', title: label, 'aria-label': label,
+            onClick: openPanel,
+          },
+            h(SshIcon, { size: 16 }),
+            h('span', { className: 'dsh-ssh-header-text' }, 'SSH'),
+          )
+        }
 
     /**
      * 文件浏览区块。
@@ -814,21 +869,37 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         setNotice('')
         const full = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`
         try {
-          const data = await api('fs-download', { hostId: server.id, path: full })
-          const binary = atob(data.base64)
-          const bytes = new Uint8Array(binary.length)
-          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-          const blob = new Blob([bytes])
+          // 走二进制接口：直接拿字节流，省掉 base64 的 33% 膨胀与大字符串解析。
+          const response = await fetch(apiUrl('fs-download-raw'), {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ hostId, path: full, lang: apiLang }),
+          })
+          const isJsonError = (response.headers.get('content-type') ?? '').includes('application/json')
+          if (!response.ok || isJsonError) {
+            let data = null
+            try { data = await response.json() } catch { /* 非 JSON 响应 */ }
+            throw new ApiError(data?.message ?? `HTTP ${response.status}`, data)
+          }
+          const encodedName = response.headers.get('x-dsh-ssh-filename')
+          let filename = entry.name
+          if (encodedName !== null) {
+            try { filename = decodeURIComponent(encodedName) } catch { /* 保留原名 */ }
+          }
+          const blob = await response.blob()
           const url = URL.createObjectURL(blob)
           const a = document.createElement('a')
           a.href = url
-          a.download = data.name ?? entry.name
+          a.download = filename
           document.body.appendChild(a)
           a.click()
           document.body.removeChild(a)
           setTimeout(() => URL.revokeObjectURL(url), 5000)
           if (!alive.current) return
-          setNotice(`已下载 ${data.name ?? entry.name}（${humanSize(data.size)}）`)
+          setNotice(text(tt, 'fsDownloaded', '已下载 {name}（{size}）')
+            .replace('{name}', filename)
+            .replace('{size}', humanSize(blob.size)))
         } catch (reason) {
           if (!alive.current) return
           setError(reason instanceof ApiError ? reason.message : String(reason))
@@ -846,7 +917,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           if (sortBy === 'name') cmp = String(a.name).localeCompare(String(b.name))
           else if (sortBy === 'size') cmp = (a.size ?? 0) - (b.size ?? 0)
           else if (sortBy === 'time') cmp = (a.mtimeMs ?? 0) - (b.mtimeMs ?? 0)
-          else if (sortBy === 'type') cmp = String(fileKindLabel(a)).localeCompare(String(fileKindLabel(b)))
+          else if (sortBy === 'type') cmp = String(fileKindLabel(a, tt)).localeCompare(String(fileKindLabel(b, tt)))
           return sortAsc ? cmp : -cmp
         })
         return list
@@ -953,7 +1024,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 ),
                 h('span', { className: 'dsh-fs-size' }, entry.type === 'dir' ? '—' : humanSize(entry.size)),
                 h('span', { className: 'dsh-fs-time' }, formatTime(entry.mtimeMs)),
-                h('span', { className: 'dsh-fs-type' }, fileKindLabel(entry)),
+                h('span', { className: 'dsh-fs-type' }, fileKindLabel(entry, tt)),
               )),
         ),
         h('div', { className: 'dsh-ssh-note' },
@@ -969,7 +1040,11 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 previewFile.loading
                   ? text(tt, 'fsPreviewLoading', '读取中…')
                   : [
-                    previewFile.kind === 'image' ? '图片' : previewFile.kind === 'binary' ? '二进制' : '文本',
+                    previewFile.kind === 'image'
+                      ? text(tt, 'kindImage', '图片')
+                      : previewFile.kind === 'binary'
+                        ? text(tt, 'kindBinary', '二进制')
+                        : text(tt, 'kindText', '文本'),
                     humanSize(previewFile.size),
                     previewFile.mode ?? '',
                   ].filter(Boolean).join(' · ')),
@@ -1040,46 +1115,49 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             const pollConnections = async () => {
               // 窗口在后台时跳过本轮，省一批 SSH 往返；回前台后下一轮会追上
               if (typeof document !== 'undefined' && document.hidden === true) return
+              const hostIds = profiles.map((profile) => profile.id)
+              if (hostIds.length === 0) return
+              // 单请求批量取状态：以前是每台主机串行发一次请求，N 台就是 N 个往返
+              let states = null
+              try {
+                const data = await api('connection-state', { hostIds })
+                states = data?.states ?? null
+              } catch {
+                states = null
+              }
+              if (cancelled) return
               for (const profile of profiles) {
-                try {
-                  // 服务端非侵入式检测：终端状态 + 屏幕断线特征。
-                  const data = await api('connection-state', { hostId: profile.id })
-                  if (cancelled) return
-                  const alive = data.alive === true
-                  setLiveConn(previous => {
-                    const next = alive
-                      ? { state: 'alive', connected: true }
-                      : (data.reason === 'not-connected' || data.reason === 'terminal-exited'
-                        ? { state: 'idle', connected: false }
-                        : { state: 'unresponsive', connected: false })
-                    const current = previous[profile.id]
-                    // 心跳每 30 秒一次，状态没变就不触发重渲染
-                    if (current && current.state === next.state) return previous
-                    return { ...previous, [profile.id]: next }
-                  })
-                  // 连接成功即主动展开文件区块；断开则收起，避免展示过期目录
-                  setFsOpen(previous => {
-                    if (alive) {
-                      if (previous[profile.id] === false) return previous // 用户手动收起过，尊重选择
-                      if (previous[profile.id] === true) return previous
-                      return { ...previous, [profile.id]: true }
-                    }
-                    if (previous[profile.id] === undefined) return previous
-                    const next = { ...previous }
-                    delete next[profile.id]
-                    return next
-                  })
-                } catch {
-                  if (!cancelled) {
-                    setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'unresponsive', connected: false } }))
-                    setFsOpen(previous => {
-                      if (previous[profile.id] === undefined) return previous
-                      const next = { ...previous }
-                      delete next[profile.id]
-                      return next
-                    })
-                  }
+                const state = states?.[profile.id]
+                if (state === undefined) {
+                  // 整个请求失败：保持原状态，不要误判成断线
+                  if (states === null) continue
+                  setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'unresponsive', connected: false } }))
+                  continue
                 }
+                const alive = state.alive === true
+                setLiveConn(previous => {
+                  const next = alive
+                    ? { state: 'alive', connected: true }
+                    : (state.reason === 'not-connected' || state.reason === 'terminal-exited'
+                      ? { state: 'idle', connected: false }
+                      : { state: 'unresponsive', connected: false })
+                  const current = previous[profile.id]
+                  // 心跳每 30 秒一次，状态没变就不触发重渲染
+                  if (current && current.state === next.state) return previous
+                  return { ...previous, [profile.id]: next }
+                })
+                // 连接成功即主动展开文件区块；断开则收起，避免展示过期目录
+                setFsOpen(previous => {
+                  if (alive) {
+                    if (previous[profile.id] === false) return previous // 用户手动收起过，尊重选择
+                    if (previous[profile.id] === true) return previous
+                    return { ...previous, [profile.id]: true }
+                  }
+                  if (previous[profile.id] === undefined) return previous
+                  const next = { ...previous }
+                  delete next[profile.id]
+                  return next
+                })
               }
             }
             void pollConnections()
@@ -1277,7 +1355,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             try {
               const created = await ctx.sessions.create(workspaceId === undefined ? {} : { workspaceId })
               createdSession = typeof created === 'string' ? created : created?.sessionId
-              if (typeof createdSession !== 'string') throw new Error('新聊天没有返回会话 ID。')
+              if (typeof createdSession !== 'string') throw new Error(text(tt, 'noSessionId', '新聊天没有返回会话 ID。'))
               try {
                 await api('connect', {
                   hostId: profile.id,
@@ -1296,7 +1374,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true } }))
                   setFsOpen(previous => ({ ...previous, [profile.id]: true }))
                   revealPanel()
-                  setError(`${apiFailure.message}\n终端已保留；可点「打开新聊天」进入对应聊天手动处理。`)
+                  setError(`${apiFailure.message}\n${text(tt, 'terminalKept', '终端已保留；可点「打开新聊天」进入对应聊天手动处理。')}`)
                   return
                 }
                 throw failure
@@ -1351,7 +1429,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 h('label', { htmlFor: 'dsh-ssh-name' }, text(tt, 'name', '名称')),
                 h('input', {
                   id: 'dsh-ssh-name', value: form.name, maxLength: 40, autoFocus: true,
-                  placeholder: '生产主机', onChange: event => setField('name', event.target.value),
+                  placeholder: text(tt, 'namePlaceholder', '生产主机'), onChange: event => setField('name', event.target.value),
                 }),
               ),
               h('div', { className: 'dsh-ssh-grid2' },
@@ -1439,7 +1517,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                     h('label', { htmlFor: 'dsh-ssh-passphrase' }, text(tt, 'passphrase', '私钥口令（没有口令可留空）')),
                     h('input', {
                       id: 'dsh-ssh-passphrase', type: 'password', value: form.passphrase, autoComplete: 'new-password',
-                      placeholder: form.hasPassphrase ? text(tt, 'passphraseHint', '已保存；留空则保持不变') : '可留空',
+                      placeholder: form.hasPassphrase ? text(tt, 'passphraseHint', '已保存；留空则保持不变') : text(tt, 'leaveEmpty', '可留空'),
                       onChange: event => setField('passphrase', event.target.value),
                     }),
                   ),
@@ -1639,7 +1717,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           }
 
           return h('div', { className: 'dsh-ssh-root' },
-            h('style', null, CSS),
             h('div', { className: 'dsh-ssh-head' },
               h('div', null,
                 h('h2', { className: 'dsh-ssh-title' }, text(tt, 'title', 'SSH 服务')),

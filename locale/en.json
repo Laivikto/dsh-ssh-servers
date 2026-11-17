@@ -110,5 +110,19 @@
   "fsPreviewTruncated": "File is large — showing the first 1 MB",
   "fsExpand": "Show files",
   "fsCollapse": "Hide files",
-  "fsConnectedBadge": "Connected"
+  "fsConnectedBadge": "Connected",
+  "fsDownloaded": "Downloaded {name} ({size})",
+  "kindDir": "Folder",
+  "kindLink": "Link",
+  "kindFile": "File",
+  "kindImage": "Image",
+  "kindBinary": "Binary",
+  "kindText": "Text",
+  "noSessionId": "The new chat did not return a session ID.",
+  "terminalKept": "The terminal is kept; click \"Open new chat\" to handle it manually.",
+  "namePlaceholder": "Production server",
+  "leaveEmpty": "Can be left empty",
+  "ipv4": "IPv4",
+  "ipv6": "IPv6",
+  "ipv6Short": "IPv6"
 }

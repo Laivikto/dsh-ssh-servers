@@ -32,6 +32,19 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Check publish contents
+        run: |
+          # 确认打包内容符合预期：不含 tests/.github/密钥，且包含必需文件
+          npm pack --dry-run 2>&1 | tee pack.log
+          for f in index.js client.js cordis.patch.yml icon.svg package.json; do
+            grep -q "$f" pack.log || { echo "::error::打包内容缺少 $f"; exit 1; }
+          done
+          if grep -Eq 'tests/|\.github/|\.pem|\.key$' pack.log; then
+            echo "::error::打包内容包含了不应发布的文件"
+            exit 1
+          fi
+          echo "打包内容符合预期"
+
   lint-package:
     name: Validate package manifest
     runs-on: ubuntu-latest
