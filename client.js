@@ -359,7 +359,7 @@ window.__ModuleLoader__.load({
       .dsh-ssh-seg button:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
       .dsh-ssh-banner{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-radius:8px;padding:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 9%,transparent);color:var(--dsw-alias-state-error-primary);font-size:12px;white-space:pre-wrap;word-break:break-word}
       .dsh-ssh-ok{color:var(--dsw-alias-state-success-primary);font-size:11.5px}
-      .dsh-ssh-header-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:7px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+      .dsh-ssh-header-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:7px;height:28px;display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;padding:0 8px;font:inherit;font-size:11px;font-weight:600;letter-spacing:.02em;line-height:1;white-space:nowrap}
       .dsh-ssh-header-btn:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
       .dsh-ssh-header-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
       @container (max-width:340px){.dsh-ssh-grid2{grid-template-columns:1fr}}
@@ -553,8 +553,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 文件标签图标：与 SshIcon 同一套视觉语言（终端窗口造型），
-     * 内部换成「文件 + 内容行」，一眼看出是 SSH 会话里的文件浏览。
+     * 文件浏览图标：与 SshIcon（钥匙）区分开，
+     * 用「文件夹 + 内容行」表示文件浏览区块，同样保持细线条风格。
      */
     function FsIcon({ size = 18 }) {
       return h('svg', {
@@ -573,13 +573,30 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 插件图标：一把斜置的密钥。
+     * 通用终端窗口（方框 + `>_`）辨识度太低，这里改用钥匙——
+     * SSH 最本质的特征是密钥认证，钥匙能一眼把它和普通终端区分开，
+     * 且在小尺寸（16–18px）下轮廓依然清晰。
+     */
     function SshIcon({ size = 18 }) {
       return h('svg', {
         width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
         'aria-hidden': true, focusable: 'false',
       },
-        h('rect', { x: 3, y: 5, width: 18, height: 14, rx: 2.5, stroke: 'currentColor', strokeWidth: 1.6 }),
-        h('path', { d: 'm7 9 2.6 2.6L7 14.2M12 14.5h5', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        // 钥匙头：外圈 + 中心孔
+        h('circle', { cx: 7.5, cy: 7.5, r: 3.4, stroke: 'currentColor', strokeWidth: 1.7 }),
+        h('circle', { cx: 7.5, cy: 7.5, r: 1.1, fill: 'currentColor' }),
+        // 钥匙柄
+        h('path', {
+          d: 'M10 10 18.8 18.8',
+          stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round',
+        }),
+        // 柄上的两道齿
+        h('path', {
+          d: 'M14.8 14.8 16.6 13M17.4 17.4 19.2 15.6',
+          stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round',
+        }),
       )
     }
 
@@ -650,7 +667,10 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             h('button', {
               type: 'button', className: 'dsh-ssh-header-btn', title: label, 'aria-label': label,
               onClick: openPanel,
-            }, h(SshIcon, { size: 17 })),
+            },
+              h(SshIcon, { size: 16 }),
+              h('span', { className: 'dsh-ssh-header-text' }, 'SSH'),
+            ),
           )
         }
 
