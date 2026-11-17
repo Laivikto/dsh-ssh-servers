@@ -73,7 +73,11 @@ describe('SSH 命令构造', () => {
 
   test('私钥通过环境变量传递，不出现在命令中', () => {
     const cmd = buildSshCommand(params)
-    assert.match(cmd, /-i "\$env:DSH_SSH_KEY_PATH"/)
+    // Windows 的 PowerShell 用 $env:，POSIX 直接用 $
+    const expected = process.platform === 'win32'
+      ? /-i "\$env:DSH_SSH_KEY_PATH"/
+      : /-i "\$DSH_SSH_KEY_PATH"/
+    assert.match(cmd, expected)
     assert.doesNotMatch(cmd, /id_ed25519/)
   })
 

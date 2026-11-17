@@ -101,7 +101,11 @@ describe('SSH 命令构造（详细）', () => {
   })
 
   test('私钥路径不进命令', () => {
-    assert.match(cmd, /-i "\$env:DSH_SSH_KEY_PATH"/)
+    // Windows 的 PowerShell 用 $env:，POSIX 直接用 $（这个断言以前只按 Windows 写，CI 的 Linux 任务因此一直失败）
+    const expected = process.platform === 'win32'
+      ? /-i "\$env:DSH_SSH_KEY_PATH"/
+      : /-i "\$DSH_SSH_KEY_PATH"/
+    assert.match(cmd, expected)
     assert.doesNotMatch(cmd, /id_ed25519/)
   })
 
