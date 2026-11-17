@@ -583,6 +583,7 @@ window.__ModuleLoader__.load({
       return h('svg', {
         width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
         'aria-hidden': true, focusable: 'false',
+        style: { flex: '0 0 auto', display: 'block' },
       },
         // 钥匙头：外圈 + 中心孔
         h('circle', { cx: 7.5, cy: 7.5, r: 3.4, stroke: 'currentColor', strokeWidth: 1.7 }),
@@ -663,7 +664,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         function HeaderButton() {
           const label = text(t, 'openPanel', '打开 SSH 服务')
           return h(React.Fragment, null,
-            h('style', null, `.dsh-ssh-header-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:7px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0}.dsh-ssh-header-btn:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}.dsh-ssh-header-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}`),
+            h('style', null, `.dsh-ssh-header-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);border-radius:7px;height:28px;display:inline-flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;padding:0 8px;font:inherit;font-size:11px;font-weight:600;letter-spacing:.02em;line-height:1;white-space:nowrap}.dsh-ssh-header-btn:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}.dsh-ssh-header-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.dsh-ssh-header-btn svg{flex:0 0 auto;display:block}`),
             h('button', {
               type: 'button', className: 'dsh-ssh-header-btn', title: label, 'aria-label': label,
               onClick: openPanel,
