@@ -49,7 +49,12 @@ describe('端口规范化', () => {
 
 describe('私钥路径规范化', () => {
   test('绝对路径通过', () => {
-    assert.ok(normalizeKeyPath('C:\\Users\\me\\.ssh\\id_ed25519'))
+    // path.isAbsolute 走的是运行平台规则：Windows 路径在 Linux 上不是绝对路径。
+    // 这条断言以前写死 Windows 路径，导致 CI 的 ubuntu 任务从 v1.0.0 起一直失败。
+    const sample = process.platform === 'win32'
+      ? 'C:\\Users\\me\\.ssh\\id_ed25519'
+      : '/home/me/.ssh/id_ed25519'
+    assert.ok(normalizeKeyPath(sample))
   })
 
   test('相对路径被拒绝', () => {
