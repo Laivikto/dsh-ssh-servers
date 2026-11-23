@@ -51,7 +51,16 @@ function normalizeKeyPath(value) {
  * KEY_FILE_HINT：文件名是否「疑似私钥」（GUI 密钥选择器用）。
  * MAX_ENTRIES：目录列表与密钥候选共用的条目上限。
  */
-const DISCONNECT_PATTERN = /(?:Connection to .* closed|Connection reset by|client_loop:|Broken pipe|Connection closed by remote host|Disconnected from)/iu
+/**
+ * ssh 客户端自身打印的断线提示（必须位于行首）。
+ * 以前的正则在整屏任意位置匹配 "Broken pipe" / "Connection reset by"，
+ * 远端程序的普通日志（如 "ERROR write: Broken pipe"）也会被当成断线并清掉仍有效的连接。
+ */
+const SSH_DISCONNECT_LINE = /^(?:Connection to \S+ closed\b|Connection (?:reset|closed) by \S+(?: port \d+)?\s*$|client_loop: send disconnect:|packet_write_wait: Connection to |Timeout, server \S+ not responding|(?:Write failed|write): Broken pipe\s*$|Disconnected from |Received disconnect from )/iu
+/** 断线提示之后允许出现的本机 Windows 提示符（ssh 退出后本地 shell 可能来得及打印一行）。 */
+const LOCAL_WINDOWS_PROMPT = /^(?:PS )?[A-Za-z]:\\[^>\n]*>\s*$/u
+/** 只看屏幕末尾的几行：断线提示是 ssh 退出前打印的最后内容。 */
+const DISCONNECT_TAIL_LINES = 3
 const KEY_FILE_HINT = /^(id_(rsa|dsa|ecdsa|ed25519)|.*\.(pem|key|ppk|openssh|priv))$/iu
 const MAX_ENTRIES = 200
 
@@ -76,9 +85,21 @@ function sortKeyCandidates(files) {
   return [...files].sort((a, b) => (Number(b.likelyKey) - Number(a.likelyKey)) || a.name.localeCompare(b.name))
 }
 
-/** 屏幕文本是否显示 SSH 已断开。 */
+/**
+ * 屏幕文本是否显示 SSH 已断开。
+ * 只有「ssh 客户端格式的断线行」出现在屏幕最后几行、且其后只剩空行或本机 Windows 提示符时才算。
+ * 远端程序输出里夹带的同类字样后面通常还有远端输出或远端提示符，不会被误判。
+ * 这是终端进程退出（主判据）之外的辅助信号。
+ */
 function looksDisconnected(screen) {
-  return DISCONNECT_PATTERN.test(screen)
+  const lines = String(screen ?? '').split(/\r?\n/u).map(line => line.trim()).filter(line => line !== '')
+  const tail = lines.slice(-DISCONNECT_TAIL_LINES)
+  let hit = -1
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (SSH_DISCONNECT_LINE.test(tail[i])) { hit = i; break }
+  }
+  if (hit < 0) return false
+  return tail.slice(hit + 1).every(line => LOCAL_WINDOWS_PROMPT.test(line))
 }
 
 /** 把连接探测结果映射为前端状态：alive / idle / unresponsive。 */
@@ -191,14 +212,36 @@ function isJsonObject(value) {
 
 const langStore = new AsyncLocalStorage()
 
-/** 在当前请求上下文里设定语言（enterWith 只影响本异步上下文）。 */
+function normalizeLang(lang) {
+  return String(lang).toLowerCase().startsWith('en') ? 'en' : 'zh'
+}
+
+/**
+ * 在当前请求上下文里设定语言。
+ * 请求入口用 run({ lang }) 建立一个「可变」的请求级对象，这里直接改它的字段：
+ * 以前用 enterWith 替换存储值，但 readJson 是被 await 的子函数，
+ * 它里面的 enterWith 不会传回外层 handler，导致 body.lang 实际不生效。
+ */
 function setLang(lang) {
-  langStore.enterWith(String(lang).toLowerCase().startsWith('en') ? 'en' : 'zh')
+  const value = normalizeLang(lang)
+  const store = langStore.getStore()
+  if (store !== null && typeof store === 'object') {
+    store.lang = value
+    return
+  }
+  langStore.enterWith({ lang: value })
+}
+
+/** 当前请求语言（兼容测试里直接 run('en') 的字符串写法）。 */
+function currentLang() {
+  const store = langStore.getStore()
+  const value = store !== null && typeof store === 'object' ? store.lang : store
+  return value === 'en' ? 'en' : 'zh'
 }
 
 /** 按当前请求语言取消息；未收录的文案回退中文。 */
 function msg(zh, en) {
-  return langStore.getStore() === 'en' ? en : zh
+  return currentLang() === 'en' ? en : zh
 }
 
 /** 从请求推断语言：body.lang 优先，Accept-Language 兜底。 */
@@ -326,7 +369,7 @@ async function readRecord(ctx, hostId) {
 
 async function writeRecord(ctx, hostId, payload) {
   const credentials = await credentialsOf(ctx)
-  if (credentials === undefined) throw new Error('凭据库不可用。')
+  if (credentials === undefined) throw new Error(msg('凭据库不可用。', 'The credential store is unavailable.'))
   await credentials.modifyRecord(recordKey(hostId), async () => ({ kind: 'grant', payload }))
 }
 
@@ -357,7 +400,8 @@ function terminalTitle(name) {
 }
 
 function psQuote(value) {
-  return `'${String(value).replace(/'/gu, "''")}'`
+  // PowerShell 把 ‘ ’ ‚ ‛ 也当作单引号定界符，必须和 ASCII 单引号一样成对转义。
+  return `'${String(value).replace(/['‘’‚‛]/gu, quote => quote + quote)}'`
 }
 
 function posixQuote(value) {
@@ -376,7 +420,26 @@ function shellQuoteFactory(shellName) {
 
 /** Windows 下判断 shell 是否为 cmd.exe（三处调用共用，避免正则重复）。 */
 function isCmdShell(shellName) {
-  return /cmd(?:\.exe)?$/iu.test(shellName)
+  return /cmd(?:\.exe)?$|command prompt/iu.test(String(shellName ?? ''))
+}
+
+/**
+ * 终端里启动 ssh 的写法。
+ * Windows 上用解析出的绝对路径：cmd.exe 会优先在当前目录（聊天的工作目录）里找 ssh，
+ * 目录里若被放了伪装的 ssh.exe / ssh.bat 就会被执行。与文件通道使用同一个 ssh.exe，
+ * 也避免 PATH 里的 Git ssh 与系统 OpenSSH（ssh-agent 管道不同）行为不一致。
+ * Windows 上找不到绝对路径时直接抛错：静默回退到裸 `ssh` 会把上面两个风险原样带回来。
+ */
+function sshInvocation(shellName, bin = SSH_BIN) {
+  if (process.platform !== 'win32') return 'ssh'
+  if (!isAbsolute(bin)) {
+    throw new Error(
+      '找不到 Windows 自带的 ssh.exe（通常在 C:\\Windows\\System32\\OpenSSH\\）。'
+      + '为避免执行到当前目录里的同名程序，插件不会退回使用 PATH 中的 ssh；'
+      + '请安装「OpenSSH 客户端」可选功能后重试。',
+    )
+  }
+  return isCmdShell(shellName) ? cmdQuote(bin) : `& ${psQuote(bin)}`
 }
 
 function buildSshCommand({ shellName, host, port, username, authMode, hostKeyPolicy }) {
@@ -384,7 +447,7 @@ function buildSshCommand({ shellName, host, port, username, authMode, hostKeyPol
   const emptyConfig = process.platform === 'win32' ? 'NUL' : '/dev/null'
   // VERBOSE 与 -v（DEBUG1）同样输出 "Authenticated to ..." 用于判定登录成功，
   // 但不会打印 debug1: Will attempt key: <私钥路径>，避免私钥路径进入屏幕与 AI 上下文。
-  const parts = ['ssh', '-o', 'LogLevel=VERBOSE', '-F', emptyConfig]
+  const parts = [sshInvocation(shellName), '-o', 'LogLevel=VERBOSE', '-F', emptyConfig]
   const option = (name, value) => {
     parts.push(name, quote(value))
   }
@@ -398,7 +461,9 @@ function buildSshCommand({ shellName, host, port, username, authMode, hostKeyPol
   option('-o', 'ProxyJump=none')
   option('-o', 'PermitLocalCommand=no')
   option('-o', 'RemoteCommand=none')
-  option('-o', 'KnownHostsCommand=none')
+  // 不再传 KnownHostsCommand=none：该选项 OpenSSH 8.5 才有，旧版 ssh（Windows 10 自带 8.1、
+  // Ubuntu 20.04 的 8.2 等）遇到未知 -o 会直接退出，导致终端连接必然失败。
+  // -F 指定空配置后系统级与用户级 ssh_config 都不会读取，KnownHostsCommand 本就无从设置。
   option('-o', hostKeyPolicy === 'strict' ? 'StrictHostKeyChecking=yes' : 'StrictHostKeyChecking=accept-new')
   if (authMode === 'password') {
     option('-o', 'PreferredAuthentications=password,keyboard-interactive')
@@ -466,10 +531,16 @@ async function waitForConnection(terminal, options, loginMark) {
   const startedAt = Date.now()
   while (Date.now() < deadline) {
     if (terminal.info?.state === 'exited' || terminal.info?.state === 'failed') {
-      return { ok: false, code: 'ssh-exited', message: 'SSH 进程已退出，未建立连接。' }
+      return { ok: false, code: 'ssh-exited', message: msg('SSH 进程已退出，未建立连接。', 'The SSH process exited before a connection was established.') }
     }
     await terminal.drain().catch(() => {})
     const transcript = markText(loginMark)
+    // 先认「已认证」：登录后的 MOTD/Banner 里若恰好有 "Password:" 或 "Permission denied"
+    // 字样，旧顺序会误报失败，甚至把密码写进已登录的远端 shell（随后被回显进 AI 上下文）。
+    if (/(?:^|\n)Authenticated to [^\n]*/u.test(transcript)) {
+      await sleep(150)
+      return { ok: true, terminalId: terminal.id }
+    }
     const failure = loginFailure(transcript)
     if (failure !== undefined) {
       return { ok: false, code: 'ssh-failed', message: failure }
@@ -503,13 +574,7 @@ async function waitForConnection(terminal, options, loginMark) {
     if (passphraseSent && /Permission denied/iu.test(transcript)) {
       return { ok: false, code: 'auth-failed', message: msg("密钥或口令认证失败。请检查私钥路径和口令。", "Key or passphrase authentication failed. Check the key path and passphrase.") }
     }
-    // VERBOSE 级别不再输出 "debug1: Entering interactive session."，
-    // 登录成功只认 "Authenticated to ..."：PTY 与 shell 在此后即绪。
-    const authMatch = /(?:^|\n)Authenticated to [^\n]*/u.exec(transcript)
-    if (authMatch !== null) {
-      await sleep(150)
-      return { ok: true, terminalId: terminal.id }
-    }
+    // 登录成功只认 "Authenticated to ..."（VERBOSE 级别输出），已在循环开头判定。
     await sleep(250)
   }
   if (passwordSent || passphraseSent) {
@@ -521,11 +586,11 @@ async function waitForConnection(terminal, options, loginMark) {
 async function resolveSessionAgent(ctx, sessionId) {
   const sessionController = ctx.get('sessionController')
   if (sessionController === undefined || typeof sessionController.resolveAgent !== 'function') {
-    throw new Error('Session Controller 不可用，无法为聊天打开终端。')
+    throw new Error(msg('Session Controller 不可用，无法为聊天打开终端。', 'Session Controller is unavailable; cannot open a terminal for this chat.'))
   }
   const result = await sessionController.resolveAgent(sessionId)
   if (result === undefined || 'error' in result) {
-    throw new Error(result?.error?.message ?? '无法解析该聊天对应的 Agent。')
+    throw new Error(result?.error?.message ?? msg('无法解析该聊天对应的 Agent。', 'Could not resolve the agent for this chat.'))
   }
   return result.agent
 }
@@ -533,7 +598,7 @@ async function resolveSessionAgent(ctx, sessionId) {
 async function openSessionTerminal(ctx, agent, options) {
   const terminalController = ctx.get('terminalController')
   if (terminalController === undefined || typeof terminalController.openForAgent !== 'function') {
-    throw new Error('终端服务不可用，无法建立 SSH 会话。')
+    throw new Error(msg('终端服务不可用，无法建立 SSH 会话。', 'The terminal service is unavailable; cannot start an SSH session.'))
   }
   const workingDirectory = ctx.get('workingDirectory')
   let cwd = process.cwd()
@@ -637,6 +702,9 @@ async function connectHandler(ctx, req, res) {
       // 失败时给本地 shell 一点时间执行末尾的 exit，便于客户端区分“可手动处理的终端”
       // 与已经关闭的终端。
       await sleep(200)
+      // 已退出的终端不必再留在待清理集合里。
+      const state = terminal.info?.state
+      if (state === 'exited' || state === 'failed') pendingTerminals.delete(terminal)
       return writeJson(res, 409, {
         ok: false,
         code: outcome.code,
@@ -679,6 +747,10 @@ async function connectHandler(ctx, req, res) {
     connection.guardDispose = installToolGuard(agent)
     pendingTerminals.delete(terminal)
     connections.set(String(agent.id), connection)
+    // 同一主机只保留最新的一条连接（界面提示「已有终端会被替换」）：
+    // 每次连接都新建聊天，旧聊天里的连接若不撤销，旧聊天仍可对该主机执行命令，
+    // 连接状态也会在新旧两条之间随机取一条。只在新连接成功后才替换，失败时旧连接不受影响。
+    invalidateHostConnections(hostId, connection)
     return writeJson(res, 200, {
       ok: true,
       status: 'connected',
@@ -713,7 +785,7 @@ async function disconnectHandler(ctx, req, res) {
     if (connection === undefined) return writeJson(res, 404, { ok: false, code: 'not-connected', message: msg("该聊天没有已建立的 SSH 连接。", "No established SSH connection for this chat.") })
     if (connection.terminal.info?.control !== 'agent') {
       dropConnection(agent.id, connection)
-      return writeJson(res, 409, { ok: false, code: 'user-control', message: msg("你已接管终端；连接工具已停用，请直接在终端中退出 ssh。", "You have taken over the terminal; connection tools are disabled. Exit ssh in the terminal directly.") })
+      return writeJson(res, 409, { ok: false, code: 'user-control', message: msg("你已接管终端；连接工具已停用，请直接在终端中退出 ssh 或关闭终端标签。", "You have taken over the terminal; connection tools are disabled. Exit ssh in the terminal or close the terminal tab.") })
     }
     dropConnection(agent.id, connection)
     try {
@@ -769,7 +841,8 @@ async function saveCredentialHandler(ctx, req, res) {
   try {
     if (body.clear === true) {
       await deleteRecord(ctx, hostId)
-      return writeJson(res, 200, { ok: true, configured: false, bindingMatches: false })
+      const invalidated = invalidateHostConnections(hostId)
+      return writeJson(res, 200, { ok: true, configured: false, bindingMatches: false, invalidated })
     }
     const binding = bindingOf(body)
     if (binding.host === undefined || binding.port === undefined || binding.username === undefined || binding.authMode === undefined) {
@@ -802,7 +875,18 @@ async function saveCredentialHandler(ctx, req, res) {
       ...(nextPassphrase === undefined ? (sameTarget && typeof current?.passphrase === 'string' ? { passphrase: current.passphrase } : {}) : { passphrase: nextPassphrase }),
     }
     await writeRecord(ctx, hostId, payload)
-    return writeJson(res, 200, publicRecordStatus(payload, binding))
+    // 连接目标变了：旧连接仍指向旧服务器，必须作废，否则界面显示新地址、
+    // 聊天里的命令却继续发往旧服务器。只改名称/私钥口令等不影响目标的字段时保留连接。
+    // 「目标」以实际存活连接为准，而不是只比较凭据记录（记录可能已被改过多次）。
+    let invalidated = 0
+    for (const connection of [...connections.values()]) {
+      if (connection.hostId !== hostId) continue
+      if (!sameBinding(bindingOf(connection), binding)) {
+        invalidated += invalidateHostConnections(hostId)
+        break
+      }
+    }
+    return writeJson(res, 200, { ...publicRecordStatus(payload, binding), invalidated })
   } catch (error) {
     return writeJson(res, 500, { ok: false, code: 'credential-write-failed', message: error instanceof Error ? error.message : String(error) })
   }
@@ -831,7 +915,9 @@ async function deleteCredentialHandler(ctx, req, res) {
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
   try {
     await deleteRecord(ctx, hostId)
-    return writeJson(res, 200, { ok: true })
+    // 主机已删除：其连接不应继续可用。
+    const invalidated = invalidateHostConnections(hostId)
+    return writeJson(res, 200, { ok: true, invalidated })
   } catch (error) {
     return writeJson(res, 500, { ok: false, code: 'delete-failed', message: error instanceof Error ? error.message : String(error) })
   }
@@ -921,9 +1007,27 @@ const SSH_BIN = (() => {
   return 'ssh'
 })()
 
+/**
+ * 把 POSIX 命令包成 `sh -c '<命令>'` 交给远端。
+ * ssh 会把命令交给用户的登录 shell 解析；登录 shell 是 fish/csh/tcsh 时，
+ * `v=$(…)`、`if [ … ]; then` 等 POSIX 语法会直接报错。显式交给 sh 执行则与登录 shell 无关。
+ * 单引号包裹在 sh/bash/zsh/fish/csh 中都按字面传递。
+ */
+function remotePosixCommand(command) {
+  return `sh -c ${posixQuote(command)}`
+}
+
+/** stderr 是否表明远端不是 POSIX 环境（例如 Windows OpenSSH 服务端的 cmd/PowerShell）。 */
+function looksNonPosixRemote(stderr) {
+  return /is not recognized as an internal or external command|CommandNotFoundException|不是内部或外部命令|The term 'sh' is not recognized/iu.test(String(stderr ?? ''))
+}
+
 function execRemote(target, command, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000
   const maxBytes = options.maxBytes ?? 4 * 1024 * 1024
+  // 子进程回调里不保证还在请求的异步上下文中，这里先把语言取出来。
+  const lang = currentLang()
+  const say = (zh, en) => (lang === 'en' ? en : zh)
 
   return new Promise((resolve, reject) => {
     const args = ['-F', process.platform === 'win32' ? 'NUL' : '/dev/null']
@@ -943,8 +1047,9 @@ function execRemote(target, command, options = {}) {
     args.push('-o', 'IdentitiesOnly=yes')
 
     if (target.keyPath) args.push('-i', target.keyPath)
-    args.push(target.host)
-    args.push(command)
+    // `--` 结束选项解析：主机名虽已白名单校验（不允许以 - 开头），这里再加一道保险。
+    args.push('--', target.host)
+    args.push(options.raw === true ? command : remotePosixCommand(command))
 
     let child
     try {
@@ -978,7 +1083,7 @@ function execRemote(target, command, options = {}) {
       // SIGTERM 可能被忽略（例如卡在内核 IO），先温和再强制
       try { child.kill('SIGTERM') } catch { /* 已退出 */ }
       setTimeout(() => { try { child.kill('SIGKILL') } catch { /* 已退出 */ } }, 1000).unref?.()
-      finish(reject, new Error(`远端命令超时（${Math.round(timeoutMs / 1000)} 秒）。`))
+      finish(reject, new Error(say(`远端命令超时（${Math.round(timeoutMs / 1000)} 秒）。`, `Remote command timed out (${Math.round(timeoutMs / 1000)} s).`)))
     }, timeoutMs)
     timer.unref?.()
 
@@ -986,7 +1091,7 @@ function execRemote(target, command, options = {}) {
       if (settled) return
       outSize += chunk.length
       if (outSize > maxBytes) {
-        finish(reject, new Error('远端输出超过上限。'))
+        finish(reject, new Error(say('远端输出超过上限。', 'Remote output exceeded the limit.')))
         return
       }
       outChunks.push(chunk)
@@ -1006,10 +1111,30 @@ function execRemote(target, command, options = {}) {
       const stderr = Buffer.concat(errChunks).toString('utf8').trim()
       // BatchMode 下带口令的私钥会失败：把 ssh 的原始英文 stderr 翻译成可操作的提示。
       if (/permission denied \(publickey[^)]*\)/iu.test(stderr) || (code === 255 && /publickey/iu.test(stderr))) {
-        finish(reject, new Error('文件通道只用密钥认证，且不支持在后台输入私钥口令。若该密钥设有口令，请先用 ssh-agent 或生成无口令密钥；密码认证的主机请在终端里连接后手动查看文件。'))
+        const agentHint = process.platform === 'win32'
+          ? say('（Windows 需先启用 OpenSSH Authentication Agent 服务，再执行 ssh-add 添加该私钥）', ' (on Windows, enable the "OpenSSH Authentication Agent" service first, then run ssh-add for this key)')
+          : ''
+        finish(reject, new Error(say(
+          `文件通道只用密钥认证，且不支持在后台输入私钥口令。若该密钥设有口令，请先把它加入 ssh-agent${agentHint}，或改用无口令密钥。`,
+          `The file channel uses key authentication only and cannot prompt for a key passphrase in the background. If the key has a passphrase, add it to ssh-agent${agentHint}, or use a key without a passphrase.`,
+        )))
         return
       }
-      finish(reject, new Error(stderr || `ssh 退出码 ${code}`))
+      if (/host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/iu.test(stderr)) {
+        finish(reject, new Error(say(
+          '主机密钥校验失败（严格模式下 known_hosts 中没有该主机，或主机密钥已变化）。请确认服务器身份后再更新 known_hosts。',
+          'Host key verification failed (no known_hosts entry in strict mode, or the host key changed). Verify the server identity before updating known_hosts.',
+        )))
+        return
+      }
+      if (looksNonPosixRemote(stderr)) {
+        finish(reject, new Error(say(
+          '远端没有 POSIX shell（可能是 Windows OpenSSH 服务端），文件浏览目前只支持 Linux / Unix 服务器。',
+          'The remote has no POSIX shell (possibly a Windows OpenSSH server); file browsing currently supports Linux / Unix servers only.',
+        )))
+        return
+      }
+      finish(reject, new Error(stderr || say(`ssh 退出码 ${code}`, `ssh exited with code ${code}`)))
     })
   })
 }
@@ -1113,13 +1238,71 @@ async function resolveFsTarget(ctx, res, hostId) {
     writeJson(res, 409, {
       ok: false,
       code: 'credential-incomplete',
+      // 文件通道是独立的 BatchMode ssh 进程，不复用交互终端，因此只能用密钥认证；
+      // 旧提示「保持终端连接」照做也无法使文件浏览可用。
       message: record.authMode === 'password'
-        ? msg('密码认证暂不支持后台浏览，请改用密钥或保持终端连接。', 'Background browsing is unavailable for password auth; use a key or keep the terminal connected.')
+        ? msg('文件浏览只支持密钥认证的主机（它使用独立的后台 ssh 通道，不复用终端）。密码登录的主机请在终端里用 ls / cat 等命令查看文件，或把该主机改为密钥认证。', 'File browsing supports key-authenticated hosts only (it uses a separate background ssh channel and does not reuse the terminal). For password hosts, use ls / cat in the terminal, or switch the host to key authentication.')
         : msg('凭据不完整或私钥不可读。', 'Credentials are incomplete or the private key is unreadable.'),
     })
     return { ok: false }
   }
   return { ok: true, target }
+}
+
+// ---------- 远端 POSIX 命令（抽成纯函数，便于在本机 sh 里直接验证） ----------
+
+/** 探测目录：不存在/不可读 → __ERR__；GNU find 支持 -printf → __GNU__；否则两者都不输出。 */
+function fsProbeCommand(dir) {
+  const quoted = posixQuote(dir)
+  return `echo ${FS_BEGIN}; ` +
+    `if [ ! -d ${quoted} ] || [ ! -r ${quoted} ] || [ ! -x ${quoted} ]; then echo __ERR__; ` +
+    `elif find ${quoted} -maxdepth 1 -mindepth 1 -printf '' >/dev/null 2>&1; then echo __GNU__; ` +
+    `fi; echo ${FS_END}`
+}
+
+/** GNU find：一次拿到 类型/大小/时间/权限/名字。 */
+function fsGnuListCommand(dir) {
+  return `echo ${FS_BEGIN}; find ${posixQuote(dir)} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%T@\\t%m\\t%f\\n' 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+}
+
+/**
+ * 非 GNU（BusyBox/BSD/macOS）：ls -la 输出传统日期（"Nov 18 12:00"），由 parseLsOutput 解析。
+ * LC_ALL=C 固定英文月份，避免中文等本地化日期（"11月 18"）无法识别。
+ */
+function fsLsListCommand(dir) {
+  return `echo ${FS_BEGIN}; LC_ALL=C ls -la ${posixQuote(dir)} 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+}
+
+/**
+ * 预览：一次远端往返完成「取大小/权限 + 读内容」，输出 "STAT <大小> <权限>" 行，随后是 base64 内容。
+ * 优先 GNU stat；BusyBox/BSD 上 -c 不可用时退回 wc -c，避免把存在的文件误报为不存在。
+ */
+function fsPreviewCommand(filePath) {
+  const quoted = posixQuote(filePath)
+  return [
+    `v=$(stat -c '%s %a' ${quoted} 2>/dev/null)`,
+    // BSD/macOS 的 wc -c 会输出前导空格（"     123"），原样拼进 v 会让下面的 ${v%% *} 取到空串、
+    // 预览整体失败；用不加引号的 echo 去掉首尾空白。读取失败时记为 -1（文件不存在/不可读）。
+    `[ -z "$v" ] && { n=$(wc -c < ${quoted} 2>/dev/null) || n=-1; v="$(echo $n) -"; }`,
+    's="${v%% *}"',
+    'm="${v##* }"',
+    'echo "STAT $s $m"',
+    `lim=$s; [ "$lim" -gt ${FS_PREVIEW_MAX} ] && lim=${FS_PREVIEW_MAX}`,
+    '[ "$lim" -lt 0 ] && lim=0',
+    `head -c "$lim" ${quoted} 2>/dev/null | base64 2>/dev/null | tr -d '\\n'`,
+  ].join('; ')
+}
+
+/** 下载前查大小；GNU stat 不可用时退回 wc -c，读取失败输出 -1。 */
+function fsSizeCommand(filePath) {
+  const quoted = posixQuote(filePath)
+  return `v=$(stat -c %s ${quoted} 2>/dev/null); ` +
+    `if [ -n "$v" ]; then echo "$v"; else wc -c < ${quoted} 2>/dev/null || echo -1; fi`
+}
+
+/** 读取整个文件为单行 base64。从标准输入读：较旧 macOS 的 base64 只接受 -i 指定输入文件，不认位置参数。 */
+function fsBase64Command(filePath) {
+  return `base64 < ${posixQuote(filePath)} 2>/dev/null | tr -d '\\n' | head -c ${Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 1024}`
 }
 
 /**
@@ -1151,13 +1334,7 @@ async function fsListHandler(ctx, req, res) {
     //   3. 按 find 或 ls 列出目录
     // 这样修复了旧实现「-printf 失败被 2>/dev/null 吞掉、head 退出码 0、
     // 标记照常输出 → 解析成空数组而不是 null → ls 回退永不触发」的问题。
-    const quoted = posixQuote(dir)
-    const probeCmd =
-      `echo ${FS_BEGIN}; ` +
-      `if [ ! -d ${quoted} ] || [ ! -r ${quoted} ] || [ ! -x ${quoted} ]; then echo __ERR__; ` +
-      `elif find ${quoted} -maxdepth 1 -mindepth 1 -printf '' >/dev/null 2>&1; then echo __GNU__; ` +
-      `fi; echo ${FS_END}`
-    const probeRaw = await execRemote(target, probeCmd, { timeoutMs: 15_000 })
+    const probeRaw = await execRemote(target, fsProbeCommand(dir), { timeoutMs: 15_000 })
     const probeLines = extractMarkedLines(probeRaw, FS_BEGIN, FS_END)
     if (probeLines === null) {
       return writeJson(res, 500, { ok: false, code: 'list-failed', message: msg("无法探测远端目录状态。", "Could not probe the remote directory state.") })
@@ -1170,13 +1347,11 @@ async function fsListHandler(ctx, req, res) {
     let entries = null
     if (isGnu) {
       // GNU find：一次拿到类型/大小/时间/权限/名字
-      const gnuCmd = `echo ${FS_BEGIN}; find ${quoted} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%T@\\t%m\\t%f\\n' 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
-      const raw = await execRemote(target, gnuCmd, { timeoutMs: 20_000 })
+      const raw = await execRemote(target, fsGnuListCommand(dir), { timeoutMs: 20_000 })
       entries = parseFindOutput(raw)
     } else {
-      // 非 GNU：BusyBox ls 不支持 --time-style，用最朴素的 ls -la（parseLsOutput 自带解析）
-      const lsCmd = `echo ${FS_BEGIN}; ls -la ${quoted} 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
-      const raw = await execRemote(target, lsCmd, { timeoutMs: 20_000 })
+      // 非 GNU（BusyBox/BSD/macOS）：ls -la 输出传统日期，由 parseLsOutput 解析
+      const raw = await execRemote(target, fsLsListCommand(dir), { timeoutMs: 20_000 })
       entries = parseLsOutput(raw)
     }
 
@@ -1226,8 +1401,38 @@ function parseFindOutput(text) {
   return out
 }
 
-/** 解析 ls -la --time-style=+%s 输出。 */
-function parseLsOutput(text) {
+const LS_MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 }
+
+/**
+ * ls 的传统日期 → 毫秒时间戳。
+ * "Nov 18 12:00"（近半年内，不带年份）或 "Nov 18  2024"（较早，带年份）。
+ * 不带年份时取今年；若因此落在未来超过一天，说明是去年的文件。
+ * 远端时区未知，按本机时区换算，只用于显示与排序。
+ */
+function lsDateToMs(monthName, day, timeOrYear, now = Date.now()) {
+  const month = LS_MONTHS[String(monthName).toLowerCase()]
+  const d = Number(day)
+  if (month === undefined || !Number.isInteger(d) || d < 1 || d > 31) return 0
+  if (/^\d{4}$/u.test(timeOrYear)) return new Date(Number(timeOrYear), month, d).getTime()
+  const hm = /^(\d{1,2}):(\d{2})$/u.exec(timeOrYear)
+  if (hm === null) return 0
+  const year = new Date(now).getFullYear()
+  let ms = new Date(year, month, d, Number(hm[1]), Number(hm[2])).getTime()
+  if (ms > now + 86_400_000) ms = new Date(year - 1, month, d, Number(hm[1]), Number(hm[2])).getTime()
+  return ms
+}
+
+/**
+ * ls -la 的一行：权限 链接数 属主 属组 大小 时间 名称。
+ * 时间兼容两种格式：
+ *  - 纯数字时间戳（GNU ls --time-style=+%s）
+ *  - 传统格式 "Mon DD HH:MM" / "Mon DD  YYYY"（BusyBox、BSD、macOS 的默认输出）
+ * 设备文件的大小位置是 "主, 次" 设备号，按 0 字节处理。权限串后可带 ACL/SELinux/xattr 标记（+ . @）。
+ */
+const LS_LINE = /^([-dlcbps])([rwxsStT-]{9})[.+@]?\s+\d+\s+\S+\s+\S+\s+(?:(\d+)|\d+,\s*\d+)\s+(?:(\d{6,})|([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}:\d{2}|\d{4}))\s(.*)$/u
+
+/** 解析 ls -la 输出（兼容纯数字时间戳与传统日期两种格式）。 */
+function parseLsOutput(text, now = Date.now()) {
   const marked = extractMarkedLines(text, FS_BEGIN, FS_END)
   const lines = marked !== null ? marked : String(text ?? '').split('\n')
   const out = []
@@ -1239,17 +1444,19 @@ function parseLsOutput(text) {
     if (/^[a-z]:\\/i.test(trimmed)) continue
     if (/^(?:\$|>|root@|\^C|<)/.test(trimmed)) continue
     if (/2>\/dev\/null|--time-style/.test(trimmed)) continue
-    const m = trimmed.match(/^([-dlcbps])([rwxsStT-]{9})[.+?]?\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s+(.*)$/)
+    const m = LS_LINE.exec(trimmed)
     if (!m) continue
-    const name = m[5].trim()
-    if (name === '.' || name === '..') continue
+    // 传统格式下年份前有两个空格（"Nov 18  2024 name"），正则只吃掉一个分隔空格，这里去掉前导空白
+    const name = m[8].replace(/^\s+/u, '')
+    if (name === '' || name === '.' || name === '..') continue
     // ls 只在符号链接行追加 "-> target"；普通文件名里的箭头必须原样保留
     const kind = m[1] === 'd' ? 'dir' : m[1] === 'l' ? 'link' : 'file'
+    const mtimeMs = m[4] !== undefined ? Number(m[4]) * 1000 : lsDateToMs(m[5], m[6], m[7], now)
     out.push({
       name: kind === 'link' ? name.replace(/\s+->\s+.*$/, '') : name,
       type: kind,
       size: Number(m[3]) || 0,
-      mtimeMs: Number(m[4]) * 1000,
+      mtimeMs,
       mode: `${m[1]}${m[2]}`,
     })
   }
@@ -1337,23 +1544,12 @@ async function fsPreviewHandler(ctx, req, res) {
     // 一次远端往返完成「取大小/权限 + 读内容」：
     // 以前是 statCmd（15s）+ b64Cmd（30s）两次 ssh 进程，延迟翻倍。
     // 优先 GNU stat；BusyBox/BSD 上 -c 不可用时退回 wc -c，避免把存在的文件误报为不存在。
-    const quoted = posixQuote(filePath)
-    const probeCmd = [
-      `v=$(stat -c '%s %a' ${quoted} 2>/dev/null)`,
-      `[ -z "$v" ] && v="$(wc -c < ${quoted} 2>/dev/null || echo -1) -"`,
-      's="${v%% *}"',
-      'm="${v##* }"',
-      'echo "STAT $s $m"',
-      `lim=$s; [ "$lim" -gt ${FS_PREVIEW_MAX} ] && lim=${FS_PREVIEW_MAX}`,
-      '[ "$lim" -lt 0 ] && lim=0',
-      `head -c "$lim" ${quoted} 2>/dev/null | base64 2>/dev/null | tr -d '\\n'`,
-    ].join('; ')
+    const probeCmd = fsPreviewCommand(filePath)
     const probeRaw = String(await execRemote(target, probeCmd, { timeoutMs: 30_000 }) ?? '')
-    // 首行是 STAT 头，其余是 base64 内容
-    const newlineAt = probeRaw.indexOf('\n')
-    const statLine = (newlineAt >= 0 ? probeRaw.slice(0, newlineAt) : probeRaw).trim()
-    const b64Raw = newlineAt >= 0 ? probeRaw.slice(newlineAt + 1) : ''
-    const statMatch = /^STAT (-?\d+) (\S+)$/u.exec(statLine)
+    // STAT 头之后是 base64 内容。按标记行定位而不是假设它在第一行：
+    // 个别服务器的 shell 启动脚本在非交互登录时也会先输出内容。
+    const statMatch = /(?:^|\n)STAT (-?\d+) (\S+)[ \t\r]*(?:\n|$)/u.exec(probeRaw)
+    const b64Raw = statMatch === null ? '' : probeRaw.slice(statMatch.index + statMatch[0].length)
     if (statMatch === null) {
       return writeJson(res, 500, { ok: false, code: 'read-failed', message: msg('读取文件内容失败。', 'Failed to read the file contents.') })
     }
@@ -1421,9 +1617,7 @@ async function fsPreviewHandler(ctx, req, res) {
  */
 async function readRemoteFile(res, target, filePath) {
   // 先查大小，避免把超大文件读进内存；GNU stat 不可用时退回 wc -c
-  const sizeCmd = `v=$(stat -c %s ${posixQuote(filePath)} 2>/dev/null); ` +
-    `if [ -n "$v" ]; then echo "$v"; else wc -c < ${posixQuote(filePath)} 2>/dev/null || echo -1; fi`
-  const sizeRaw = await execRemote(target, sizeCmd, { timeoutMs: 20_000 })
+  const sizeRaw = await execRemote(target, fsSizeCommand(filePath), { timeoutMs: 20_000 })
   const size = Number(String(sizeRaw).trim().split('\n').pop())
   if (!Number.isFinite(size) || size < 0) {
     writeJson(res, 404, { ok: false, code: 'not-found', message: msg('文件不存在或无法读取。', 'The file does not exist or cannot be read.') })
@@ -1439,7 +1633,7 @@ async function readRemoteFile(res, target, filePath) {
     return { ok: false }
   }
 
-  const b64Cmd = `base64 ${posixQuote(filePath)} 2>/dev/null | tr -d '\\n' | head -c ${Math.ceil(FS_MAX_DOWNLOAD * 4 / 3) + 1024}`
+  const b64Cmd = fsBase64Command(filePath)
   // base64 后体积约为原文的 4/3，必须显式抬高通道上限，
   // 否则超过约 3 MB 的文件会被 execRemote 的默认 4 MB 上限拒绝。
   const b64Raw = await execRemote(target, b64Cmd, {
@@ -1551,9 +1745,11 @@ async function fsDownloadRawHandler(ctx, req, res) {
  * 单主机接口与批量心跳共用，避免两套逻辑漂移。
  */
 function connectionStateOf(hostId) {
+  // 同一主机理论上只有一条连接（新连接会替换旧连接）；保险起见取最新的一条。
   let target = null
   for (const connection of connections.values()) {
-    if (connection.hostId === hostId) { target = connection; break }
+    if (connection.hostId !== hostId) continue
+    if (target === null || (connection.connectedAt ?? 0) > (target.connectedAt ?? 0)) target = connection
   }
   if (target === null) {
     return { connected: false, alive: false, reason: 'not-connected' }
@@ -1562,11 +1758,20 @@ function connectionStateOf(hostId) {
   if (terminalState !== undefined && terminalState !== 'running') {
     return { connected: false, alive: false, reason: 'terminal-exited', terminalState, connectedAt: target.connectedAt }
   }
-  // 屏幕文本里出现 SSH 断线特征 → 判定为断开
-  if (DISCONNECT_PATTERN.test(readScreenText(target.terminal, 80))) {
+  // 屏幕末尾出现 ssh 客户端断线提示 → 判定为断开（与连接监视器同一判据）
+  if (looksDisconnected(readScreenText(target.terminal, 80))) {
     return { connected: false, alive: false, reason: 'disconnected', terminalState, connectedAt: target.connectedAt }
   }
-  return { connected: true, alive: true, reason: 'alive', terminalState, connectedAt: target.connectedAt }
+  // control：'user' 表示用户已在终端里手动输入、宿主把控制权交给了用户，插件此时无法写入。
+  const control = target.terminal?.info?.control
+  return {
+    connected: true,
+    alive: true,
+    reason: 'alive',
+    terminalState,
+    connectedAt: target.connectedAt,
+    ...(typeof control === 'string' ? { control } : {}),
+  }
 }
 
 async function connectionStateHandler(ctx, req, res) {
@@ -1675,7 +1880,28 @@ function dropConnection(agentId, connection) {
     clearInterval(connection.monitor)
     try { connection.guardDispose?.() } catch { /* guard 已随 agent 释放。 */ }
   }
-  connections.delete(String(agentId))
+  // 只删除「仍是这条连接」的映射，避免把同一聊天里新建立的连接误删。
+  const key = String(agentId)
+  if (connection === undefined || connections.get(key) === connection) connections.delete(key)
+}
+
+/**
+ * 作废某个 hostId 的全部现有连接（可排除一条），并关闭仍由插件控制的终端。
+ * 用户已接管的终端保留给用户，但插件工具立即失效（连接映射已删）。
+ * 用于：主机目标被修改/删除时防止命令发往旧服务器；同一主机重新连接时替换旧连接。
+ * 返回被作废的连接数。
+ */
+function invalidateHostConnections(hostId, except) {
+  let count = 0
+  for (const [agentId, connection] of [...connections.entries()]) {
+    if (connection.hostId !== hostId || connection === except) continue
+    dropConnection(agentId, connection)
+    count++
+    try {
+      if (connection.terminal.info?.control === 'agent') void Promise.resolve(connection.terminal.close()).catch(() => {})
+    } catch { /* 终端可能已关闭。 */ }
+  }
+  return count
 }
 
 function truncateText(text, max = 30000) {
@@ -1683,6 +1909,11 @@ function truncateText(text, max = 30000) {
   return value.length <= max ? value : `…（已截断前面的输出）\n${value.slice(value.length - max)}`
 }
 
+/**
+ * 按会话的 agent 找到可用连接。
+ * 只认「本会话自己建立的连接」：SSH 工具仅在插件新建的那个聊天里可用，
+ * 其他聊天不应具备远程执行能力，避免在无关对话里误操作服务器。
+ */
 function connectionFor(exec) {
   const agentId = exec?.agent?.id
   if (agentId === undefined) return undefined
@@ -1695,34 +1926,101 @@ function connectionFor(exec) {
   return connection
 }
 
-async function runAndCapture(connection, command, signal) {
+/**
+ * 插件要往终端里写东西前的守卫。
+ * 宿主用 `info.control` 表示当前由谁掌握输入（'user' 或 'agent'）：
+ * 用户在终端里手动输入后宿主会切到 'user'，此后 agent 写入会被宿主拒绝。
+ * 宿主没有提供「按 Ctrl+C 交还控制权」的路径（旧提示照做也无法恢复），
+ * 插件也无法替用户收回控制权；能可靠恢复的方式是重新连接，新终端由插件控制。
+ */
+function assertAgentControl(terminal) {
+  const control = terminal?.info?.control
+  if (control === 'user') {
+    throw new Error(msg(
+      '该 SSH 终端已因你的手动输入切换为由你控制，插件无法再向其中写入命令。如需继续让 AI 执行命令，请在右侧「SSH 服务」面板对该主机点击「连接」重新建立连接（会新建由插件控制的终端和聊天）；当前终端可继续手动使用或自行关闭。',
+      'This SSH terminal switched to your control after you typed in it, so the plugin can no longer write commands to it. To let the AI run commands again, click "Connect" for this host in the SSH panel on the right to reconnect (this opens a new plugin-controlled terminal and chat); you can keep using or close the current terminal manually.',
+    ))
+  }
+}
+
+/** runAndCapture 的默认等待上限。 */
+const RUN_TIMEOUT_MS = 300_000
+
+/**
+ * 在用户命令后拼接完成哨兵。
+ * - 用 printf 先输出换行再输出哨兵：`printf abc` 这类末尾没有换行的输出，
+ *   旧写法 `; echo <哨兵> $?` 会把哨兵粘在同一行（"abc__DSH_DONE_…"），
+ *   要求哨兵独占一行的匹配因此失败，命令已结束却一直等到 300 秒超时。
+ * - "$?" 作为 printf 的参数在 printf 运行前展开，取到的仍是用户命令的退出码。
+ * - 命令以 `&` 或 `;` 结尾时直接用空格衔接：`cmd &; …` 与 `cmd;; …` 在 sh/bash 中是语法错误。
+ */
+function sentinelSuffix(sentinel) {
+  return `printf '\\n%s %s\\n' ${sentinel} "$?"`
+}
+
+function buildRunLine(command, sentinel) {
+  const trimmed = command.replace(/\s+$/u, '')
+  // 多行命令必须整段交给远端 shell 解析，不能逐行写入 PTY：
+  // 逐行写入时每行会被单独执行，且只有最后一行带哨兵，for/if/heredoc 会被拆坏。
+  // `{` 之后必须换行（写成 `{ ` 或 `{echo` 会被 bash 当成命令名），
+  // `}` 之前必须有换行或 `;`。
+  if (trimmed.includes('\n')) {
+    return `{\n${trimmed}\n}; ${sentinelSuffix(sentinel)}`
+  }
+  const endsWithSeparator = /(?:^|[^&])&$/u.test(trimmed) || /(?:^|[^;]);$/u.test(trimmed)
+  return `${trimmed}${endsWithSeparator ? ' ' : '; '}${sentinelSuffix(sentinel)}`
+}
+
+async function runAndCapture(connection, command, signal, options = {}) {
   const terminal = connection.terminal
-  if (terminal.info?.state !== 'running') throw new Error('SSH 终端已退出，请重新连接。')
+  if (terminal.info?.state !== 'running') throw new Error(msg('SSH 终端已退出，请重新连接。', 'The SSH terminal has exited; reconnect.'))
+  assertAgentControl(terminal)
+  const timeoutMs = options.timeoutMs ?? RUN_TIMEOUT_MS
+  const pollMs = options.pollMs ?? 350
   const mark = terminal.mark()
+  // 命令未结束就放弃等待时，向远端发 Ctrl+C 中断前台程序：
+  // 否则下一条命令会被当作输入敲进仍在运行的程序里（例如 top、tail -f）。
+  const interrupt = async () => {
+    try {
+      if (terminal.info?.state === 'running' && terminal.info?.control !== 'user') await terminal.write('\x03')
+    } catch { /* 终端可能已关闭或已被接管。 */ }
+  }
   try {
-    // 唯一哨兵：命令结束后 shell 会执行 echo __DSH_DONE_<随机>__ <退出码>。
+    // 唯一哨兵：命令结束后 shell 输出 "\n__DSH_DONE_<随机>__ <退出码>\n"。
     // 这能准确判定结束（避免把「下载中 45%」这类行误判为提示符），
     // 同时拿到真实退出码；随机数防止输出里恰好包含哨兵字样导致误判。
     const sentinel = `__DSH_DONE_${createHash('sha256').update(command).digest('hex').slice(0, 8)}_${Date.now().toString(36)}__`
-    await terminal.write(`${command}; echo ${sentinel} $?\r`)
-    const donePattern = new RegExp(`(?:^|\\n)\\s*${sentinel}\\s+(\\d+)\\s*(?:\\n|$)`, 'u')
-    const deadline = Date.now() + 300_000
-    let last = ''
+    const suffix = sentinelSuffix(sentinel)
+    await terminal.write(`${buildRunLine(command, sentinel)}\r`)
+    // 输出可能分多次到达：每轮都从标记处读取完整累计文本，哨兵行完整出现才算结束。
+    const donePattern = new RegExp(`(?:^|\\n)[ \\t]*${sentinel} (\\d+)[ \\t\\r]*(?:\\n|$)`, 'u')
+    const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      if (signal.aborted) throw new Error('命令执行已取消。')
-      await sleep(350)
+      if (signal?.aborted) {
+        await interrupt()
+        throw new Error(msg('命令执行已取消（已向远端发送 Ctrl+C）。', 'Command cancelled (Ctrl+C was sent to the remote).'))
+      }
+      await sleep(pollMs)
       await terminal.drain().catch(() => {})
       const current = mark.lines().lines.join('\n')
-      last = current
       const done = donePattern.exec(current)
       if (done !== null) {
-        // 掐掉哨兵行本身，只把命令自己的输出交给模型。
-        const text = current.slice(0, done.index) + current.slice(done.index + done[0].length)
-        return { text: truncateText(text), exitCode: Number(done[1]) }
+        // 掐掉哨兵行本身与 printf 额外补的那个换行，只把命令自己的输出交给模型；
+        // 回显的命令行里附带的哨兵后缀也一并去掉，避免把内部标记暴露给模型。
+        const before = current.slice(0, done.index)
+          .split(`; ${suffix}`).join('')
+          .split(` ${suffix}`).join('')
+          .split(suffix).join('')
+        const after = current.slice(done.index + done[0].length)
+        return { text: truncateText(before + after), exitCode: Number(done[1]) }
       }
     }
-    // 超时：告知调用方命令仍在远端运行，而不是静默返回一段可能不完整的输出。
-    throw new Error(`命令在 300 秒内未结束（可能是交互式程序如 vim/top，请改用非交互方式），已停止等待。`)
+    // 超时：告知调用方命令仍可能在远端运行，而不是静默返回一段可能不完整的输出。
+    await interrupt()
+    throw new Error(msg(
+      `命令在 ${Math.round(timeoutMs / 1000)} 秒内未结束（可能是交互式程序如 vim/top，请改用非交互方式），已停止等待并向远端发送 Ctrl+C。`,
+      `The command did not finish within ${Math.round(timeoutMs / 1000)} seconds (possibly an interactive program such as vim/top; use a non-interactive form). Stopped waiting and sent Ctrl+C to the remote.`,
+    ))
   } finally {
     try { mark.dispose() } catch { /* 终端可能已关闭。 */ }
   }
@@ -1734,6 +2032,8 @@ function registerTools(ctx) {
   const toolDisposers = []
   const register = (definition) => {
     toolDisposers.push(tools.register(definition, {
+      // 只在「本会话建立了连接」时注册：SSH 工具仅对插件新建的那个聊天可见，
+      // 其他聊天不继承远程执行能力。
       when: (context) => connections.has(String(context.agent.id)),
     }))
   }
@@ -1767,7 +2067,7 @@ function registerTools(ctx) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const connection = connectionFor(exec)
-      if (connection === undefined) throw new Error('当前聊天没有已建立的 SSH 连接。')
+      if (connection === undefined) throw new Error(msg('当前没有可用的 SSH 连接，请先在右侧栏连接一台主机。', 'No SSH connection is available; connect a host in the right sidebar first.'))
       const count = Number.isInteger(args?.lines) ? Math.min(300, Math.max(1, args.lines)) : 120
       await connection.terminal.drain().catch(() => {})
       const text = readScreenText(connection.terminal, count)
@@ -1801,9 +2101,19 @@ function registerTools(ctx) {
     timeoutMs: 330_000,
     async execute(args, exec) {
       const connection = connectionFor(exec)
-      if (connection === undefined) throw new Error('当前聊天没有已建立的 SSH 连接。')
-      const command = typeof args?.command === 'string' ? args.command : ''
-      if (command.trim() === '' || /[\u0000-\u001F\u007F]/u.test(command)) throw new Error('命令必须是非空单行文本，且不能包含控制字符。')
+      if (connection === undefined) throw new Error(msg('当前没有可用的 SSH 连接，请先在右侧栏连接一台主机。', 'No SSH connection is available; connect a host in the right sidebar first.'))
+      const rawCommand = typeof args?.command === 'string' ? args.command : ''
+      // 允许换行与制表符：模型经常写多行脚本（set -e / 备份 / 分段输出）。
+      // 只拒绝真正危险的 C0 控制字符（NUL、BEL、ESC 等），它们能注入终端转义序列。
+      // \u0009 \t、\u000A \n、\u000D \r 予以保留。
+      if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(rawCommand)) {
+        throw new Error(msg(
+          '命令包含不可见的控制字符（如 NUL、ESC），无法安全发送，请去掉后重试。',
+          'The command contains invisible control characters (NUL, ESC, …) that cannot be sent safely. Remove them and retry.',
+        ))
+      }
+      const command = rawCommand.replace(/\r\n?/gu, '\n').trim()
+      if (command === '') throw new Error(msg('命令不能为空。', 'The command must not be empty.'))
       const userQuestions = ctx.get('userQuestions')
       if (userQuestions === undefined || exec.agent === undefined) throw new Error('当前环境无法显示命令确认框，命令未执行。')
       const purpose = (typeof args?.purpose === 'string' ? args.purpose : '执行远程命令')
@@ -1829,6 +2139,23 @@ function registerTools(ctx) {
       })
       const selected = answer?.answers?.find(item => item.id === 'confirm')?.selected ?? []
       if (!selected.includes('允许执行')) throw new Error('用户拒绝了该命令，未执行。')
+      // 确认框是异步的：等待期间连接可能已被撤销（保存新地址、删除主机、断线，
+      // 或又连了同一台主机把旧连接替换掉）。这里必须重新解析一次，
+      // 并且只接受「仍是同一个连接对象」的结果——不能自动改到新连接上，
+      // 否则用户批准的是 A，命令却发到了 B。
+      const current = connectionFor(exec)
+      if (current === undefined) {
+        throw new Error(msg(
+          '批准期间 SSH 连接已断开或已被撤销，命令未执行。请重新连接后再试。',
+          'The SSH connection was closed or revoked while waiting for approval, so the command was not run. Reconnect and retry.',
+        ))
+      }
+      if (current !== connection) {
+        throw new Error(msg(
+          '批准期间 SSH 连接已变更（可能是重新连接了同一台主机），命令未执行。请重新发起命令。',
+          'The SSH connection changed while waiting for approval (the same host was likely reconnected), so the command was not run. Retry the command.',
+        ))
+      }
       const output = await runAndCapture(connection, command, exec.signal)
       const exitNote = output.exitCode === 0 ? '' : `\n[退出码: ${output.exitCode}]`
       return {
@@ -1865,8 +2192,9 @@ export function apply(ctx) {
       kind: 'exact',
       path: route.path,
       // 每个请求在独立的语言上下文里执行：先按 Accept-Language 定初值，
-      // readJson 拿到 body.lang 后再用 enterWith 覆盖（只影响本请求）。
-      handler: (req, res) => langStore.run(langOf(null, req), () => route.handler(req, res)),
+      // readJson 拿到 body.lang 后改写该请求自己的语言对象（只影响本请求）。
+      // 存的是可变对象：readJson 读到 body.lang 后改字段，外层 await 之后同样可见。
+      handler: (req, res) => langStore.run({ lang: langOf(null, req) }, () => route.handler(req, res)),
     }), `ssh-servers: route ${route.path}`)
   }
   const tools = ctx.get('tools')
@@ -1927,4 +2255,25 @@ export const __test__ = {
   looksTextual,
   hexView,
   extractMarkedLines,
+  // 1.5.1 回归测试用
+  currentLang,
+  readPostBody,
+  sshInvocation,
+  isCmdShell,
+  sentinelSuffix,
+  buildRunLine,
+  lsDateToMs,
+  remotePosixCommand,
+  looksNonPosixRemote,
+  connections,
+  connectionStateOf,
+  fsProbeCommand,
+  fsGnuListCommand,
+  fsLsListCommand,
+  fsPreviewCommand,
+  fsSizeCommand,
+  fsBase64Command,
+  invalidateHostConnections,
+  saveCredentialHandler,
+  deleteCredentialHandler,
 }

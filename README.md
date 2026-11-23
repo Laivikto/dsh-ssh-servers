@@ -84,7 +84,8 @@ Disable or remove the plugin under **Settings → Plugins**.
 - Private keys are read only by the local `ssh` process via `-i`. The plugin does not decrypt, copy, or upload them. The key path is passed through a terminal environment variable and does not appear in echoed commands, though OpenSSH debug output or terminal history may still contain it. Key **contents** are never sent to the model.
 - The key-file listing endpoint returns only name, path, size, and a "looks like a key" flag — **never file contents**. The remote file endpoints (`fs-list` / `fs-preview` / `fs-download`) do return remote content to the local panel, but only for an absolute path on a host whose saved credential you already own; they are reachable only from the trusted DSH page (loopback plus Origin / `Sec-Fetch-Site` checks) and never hand content to the model. All paths reject newline and null-byte injection and are single-quote escaped before reaching the remote shell.
 - The remote file channel honours your host-key policy: **strict** mode passes `StrictHostKeyChecking=yes`, so an unknown host key fails instead of being silently accepted.
-- The file channel spawns a resolved absolute `ssh` binary with `shell: false`, so a planted `ssh.exe` in the current directory cannot hijack it.
+- The file channel spawns a resolved absolute `ssh` binary with `shell: false`; on Windows the terminal also launches `ssh.exe` by absolute path (cmd searches the current directory first), so a planted `ssh.exe` in the current directory cannot hijack it.
+- Changing a host's connection target (address, port, username, auth mode) or deleting the host immediately invalidates its existing SSH connection, so commands can never keep going to the old server while the card shows the new address.
 - Every remote command executed through the plugin requires confirmation in the UI. Each confirmation authorizes exactly one command.
 - **The plugin cannot restrict other local tools in the chat.** If the chat also has local execution tools, the model may still attempt local commands. On connect, the plugin tries to install a tool guard allowing only `ssh_terminal_read`, `ssh_terminal_run`, web lookup, `skill`, and user confirmation; if the host version lacks support, only the prompt constrains the model. Key-file read permissions remain governed by your DSH permission mode and OS user.
 - Trust-on-first-use cannot verify a server before the first connection; strict mode requires a correct `known_hosts` entry or the connection fails.
@@ -101,7 +102,10 @@ Disable or remove the plugin under **Settings → Plugins**.
 
 - Windows requires the system OpenSSH client (`ssh.exe`).
 - The native folder picker is available only in DSH Desktop (Windows / macOS); in a plain browser, **Browse…** tells you to enter the path manually.
-- One chat tracks one SSH connection opened by this plugin; reconnecting replaces the previous agent terminal.
+- One chat tracks one SSH connection opened by this plugin; when the same host reconnects successfully, the older connection is replaced (SSH tools in the old chat stop working).
+- File browsing uses a separate background ssh channel and supports **key-authenticated** Linux / Unix hosts only; passphrase-protected keys must be added to ssh-agent first (on Windows, enable the "OpenSSH Authentication Agent" service). For password hosts, view files in the terminal.
+- Typing in the terminal hands it to you and the plugin can no longer write to it; click **Connect** in the panel again to let the AI continue.
+- The ssh options used for the terminal connection require an OpenSSH client 7.6 or later (the 8.1 bundled with Windows 10 qualifies).
 - Interactive second factors (keyboard-interactive / 2FA) must be completed manually in the right-side terminal.
 - Strict host-key verification depends on the system `known_hosts`.
 

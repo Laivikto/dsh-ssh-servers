@@ -136,6 +136,11 @@ window.__ModuleLoader__.load({
       terminalKept: '终端已保留；可点「打开新聊天」进入对应聊天手动处理。',
       namePlaceholder: '生产主机',
       leaveEmpty: '可留空',
+      authPending: '认证未完成',
+      authPendingHint: '终端已打开但尚未登录成功，文件浏览与 AI 命令不可用。可在对应聊天的终端里手动完成登录，或修正凭据后重新连接。',
+      userControl: '已手动接管',
+      userControlHint: '你在终端里手动输入后，该终端改由你控制，插件无法再写入命令。点击「连接」可重新建立由插件控制的连接。',
+      connectionReset: '连接目标已修改，旧连接已断开；请重新连接。',
     }
 
     const en = {
@@ -261,6 +266,11 @@ window.__ModuleLoader__.load({
       terminalKept: 'The terminal is kept; click "Open new chat" to handle it manually.',
       namePlaceholder: 'Production server',
       leaveEmpty: 'Can be left empty',
+      authPending: 'Not signed in',
+      authPendingHint: 'The terminal is open but login has not succeeded, so file browsing and AI commands are unavailable. Finish logging in manually in that chat\u2019s terminal, or fix the credentials and connect again.',
+      userControl: 'Taken over',
+      userControlHint: 'You typed in the terminal, so it is now under your control and the plugin can no longer write commands to it. Click "Connect" to open a new plugin-controlled connection.',
+      connectionReset: 'The connection target changed and the old connection was closed; please connect again.',
     }
 
     const CSS = `
@@ -773,6 +783,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       const [previewFile, setPreviewFile] = React.useState(null)
       // 预览请求序号：防止先发后到的响应覆盖当前选择
       const previewSeq = React.useRef(0)
+      // 目录请求序号：快速连续切换目录时，先发后到的旧响应不能覆盖当前目录
+      const listSeq = React.useRef(0)
       const [sortBy, setSortBy] = React.useState('name')
       const [sortAsc, setSortAsc] = React.useState(true)
       const alive = React.useRef(true)
@@ -799,22 +811,23 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       const load = React.useCallback(async (targetPath) => {
         // 换目录后旧预览已失效，同时作废在途的预览请求
         previewSeq.current++
+        const mine = ++listSeq.current
         setPreviewFile(null)
         setLoading(true)
         setError('')
         setNotice('')
         try {
           const data = await api('fs-list', { hostId: server.id, path: targetPath })
-          if (!alive.current) return
+          if (!alive.current || mine !== listSeq.current) return
           setPath(data.path)
           setParent(data.parent ?? null)
           setEntries(Array.isArray(data.entries) ? data.entries : [])
         } catch (reason) {
-          if (!alive.current) return
+          if (!alive.current || mine !== listSeq.current) return
           setError(reason instanceof ApiError ? reason.message : String(reason))
           setEntries([])
         } finally {
-          if (alive.current) setLoading(false)
+          if (alive.current && mine === listSeq.current) setLoading(false)
         }
       }, [server])
 
@@ -1050,7 +1063,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   ].filter(Boolean).join(' · ')),
               h('button', {
                 type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost',
-                onClick: () => setPreviewFile(null),
+                // 关闭时同时作废在途请求：否则加载中关闭后，响应到达会把预览重新打开
+                onClick: () => { previewSeq.current++; setPreviewFile(null) },
               }, text(tt, 'fsPreviewClose', '关闭')),
             ),
             previewFile.truncated
@@ -1100,6 +1114,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           // 每台主机的 IP 是否明文显示（默认打码）
           const [eyeOpen, setEyeOpen] = useState({})
           const [chatReady, setChatReady] = useState({})
+          // 每台主机最近一次「本面板改变连接状态」的时间：早于它发出的心跳结果已过时，不能覆盖新状态
+          const connStamp = useRef({})
           const mounted = useRef(true)
           // 挂载时显式置 true：StrictMode 会「挂载→清理→再挂载」，
           // 只在清理里置 false 会让第二次挂载后一直认为已卸载，
@@ -1119,6 +1135,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               if (hostIds.length === 0) return
               // 单请求批量取状态：以前是每台主机串行发一次请求，N 台就是 N 个往返
               let states = null
+              const startedAt = Date.now()
               try {
                 const data = await api('connection-state', { hostIds })
                 states = data?.states ?? null
@@ -1127,6 +1144,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               }
               if (cancelled) return
               for (const profile of profiles) {
+                // 心跳发出后本面板刚连接/断开过该主机：这轮结果反映的是旧状态，跳过
+                if ((connStamp.current[profile.id] ?? 0) >= startedAt) continue
                 const state = states?.[profile.id]
                 if (state === undefined) {
                   // 整个请求失败：保持原状态，不要误判成断线
@@ -1135,17 +1154,29 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   continue
                 }
                 const alive = state.alive === true
+                const userControl = alive && state.control === 'user'
                 setLiveConn(previous => {
                   const next = alive
-                    ? { state: 'alive', connected: true }
+                    ? { state: 'alive', connected: true, userControl }
                     : (state.reason === 'not-connected' || state.reason === 'terminal-exited'
                       ? { state: 'idle', connected: false }
                       : { state: 'unresponsive', connected: false })
                   const current = previous[profile.id]
                   // 心跳每 30 秒一次，状态没变就不触发重渲染
-                  if (current && current.state === next.state) return previous
+                  if (current && current.state === next.state && (current.userControl === true) === (next.userControl === true)) return previous
                   return { ...previous, [profile.id]: next }
                 })
+                // 连接已断开：撤掉「打开新聊天」入口，让卡片恢复「连接」按钮。
+                // 认证未完成而保留的终端（pending）不受影响，用户仍可进入对应聊天手动处理。
+                if (!alive) {
+                  setChatReady(previous => {
+                    const current = previous[profile.id]
+                    if (current === undefined || current.pending === true) return previous
+                    const next = { ...previous }
+                    delete next[profile.id]
+                    return next
+                  })
+                }
                 // 连接成功即主动展开文件区块；断开则收起，避免展示过期目录
                 setFsOpen(previous => {
                   if (alive) {
@@ -1201,6 +1232,20 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             return () => { cancelled = true }
           }, [keys])
 
+          /** 清掉某台主机与「当前连接」绑定的界面状态（连接目标变化、删除主机时使用）。 */
+          const forgetConnection = (hostId) => {
+            connStamp.current[hostId] = Date.now()
+            const without = previous => {
+              if (previous[hostId] === undefined) return previous
+              const next = { ...previous }
+              delete next[hostId]
+              return next
+            }
+            setChatReady(without)
+            setLiveConn(without)
+            setFsOpen(without)
+          }
+
           const setField = (name, value) => setForm(current => current === null ? current : ({ ...current, [name]: value }))
 
           const browseKeyDir = async () => {
@@ -1253,6 +1298,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             setError('')
             try {
               await api('credentials/delete', { hostId: profile.id })
+              forgetConnection(profile.id)
               const next = profiles.filter(item => item.id !== profile.id)
               setProfiles(next)
               saveProfiles(next)
@@ -1338,7 +1384,14 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               saveProfiles(next)
               setStatus(previous => ({ ...previous, [form.id]: saved }))
               setForm(null)
-              setNotice(saved.hasPassword || form.authMode === 'key' ? text(tt, 'credentialSaved', '连接凭据已保存。') : '')
+              // 连接目标（地址/端口/用户名/认证方式）变了：后端已撤销旧连接，
+              // 这里同步清掉旧聊天入口与「已连接」状态，避免在新地址下继续操作旧服务器。
+              const hadConnection = original !== undefined && bindingChanged
+                && (chatReady[form.id] !== undefined || liveConn[form.id] !== undefined || (saved.invalidated ?? 0) > 0)
+              if (original !== undefined && bindingChanged) forgetConnection(form.id)
+              setNotice(hadConnection
+                ? text(tt, 'connectionReset', '连接目标已修改，旧连接已断开；请重新连接。')
+                : (saved.hasPassword || form.authMode === 'key' ? text(tt, 'credentialSaved', '连接凭据已保存。') : ''))
             } catch (failure) {
               setError(`${text(tt, 'saveFailed', '保存失败')}：${formatError(failure)}`)
             } finally {
@@ -1370,9 +1423,17 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   && apiFailure.data.terminalState !== 'failed'
                 if (terminalOpened) {
                   keepSession = true
-                  setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession } }))
-                  setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true } }))
-                  setFsOpen(previous => ({ ...previous, [profile.id]: true }))
+                  // 终端还在 ≠ 已登录：例如缺少私钥口令时终端停在口令提示处。
+                  // 标记为「认证未完成」，不显示已连接、不展开文件浏览，只保留进入该聊天手动处理的入口。
+                  connStamp.current[profile.id] = Date.now()
+                  setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession, pending: true } }))
+                  setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'pending', connected: false } }))
+                  setFsOpen(previous => {
+                    if (previous[profile.id] === undefined) return previous
+                    const next = { ...previous }
+                    delete next[profile.id]
+                    return next
+                  })
                   revealPanel()
                   setError(`${apiFailure.message}\n${text(tt, 'terminalKept', '终端已保留；可点「打开新聊天」进入对应聊天手动处理。')}`)
                   return
@@ -1382,6 +1443,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               keepSession = true
               // 连接成功：生成检查提示并复制到系统剪贴板（不填入聊天输入框）。
               const prompt = buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
+              connStamp.current[profile.id] = Date.now()
               const copied = await copyToClipboard(prompt)
               setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession, prompt } }))
               setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true } }))
@@ -1558,7 +1620,11 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           /** 连接状态徽章：一次算出 className/label/title，替代原先三段重复的 IIFE。 */
           const chipInfo = (profile, ready) => {
             const st = liveConn[profile.id]?.state
+            if (st === 'alive' && liveConn[profile.id]?.userControl === true) {
+              return { className: 'dsh-ssh-chip-warn', label: text(tt, 'userControl', '已手动接管'), title: text(tt, 'userControlHint', '该终端已改由你控制，插件无法再写入命令。') }
+            }
             if (st === 'alive') return { className: 'dsh-ssh-chip-ok', label: text(tt, 'connected', '已连接'), title: text(tt, 'connected', '已连接') }
+            if (st === 'pending') return { className: 'dsh-ssh-chip-warn', label: text(tt, 'authPending', '认证未完成'), title: text(tt, 'authPendingHint', '终端已打开但尚未登录成功。') }
             if (st === 'unresponsive') return { className: 'dsh-ssh-chip-error', label: text(tt, 'unresponsive', '未响应'), title: text(tt, 'unresponsive', '未响应') }
             return {
               className: ready ? 'dsh-ssh-chip-idle' : 'dsh-ssh-chip-warn',
@@ -1577,6 +1643,9 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               && !(profile.authMode === 'password' && currentStatus.hasPassword !== true)
             const connectable = currentStatus === undefined || currentStatus.failed === true || ready
             const isAlive = liveConn[profile.id]?.state === 'alive'
+            const chat = chatReady[profile.id]
+            const showOpenChat = chat !== undefined && (isAlive || chat.pending === true)
+            const showConnect = !isAlive || liveConn[profile.id]?.userControl === true
             const expanded = isAlive && fsOpen[profile.id] === true
             // 已连接时渲染文件浏览区块；未连接不渲染任何占位
             const fileBlock = isAlive
@@ -1656,33 +1725,36 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               ),
               h('div', { className: 'dsh-ssh-note' }, statusLine(profile)),
               h('div', { className: 'dsh-ssh-actions' },
-                chatReady[profile.id] !== undefined
+                // 「打开新聊天」只对仍然有效的连接（或认证未完成、终端保留待手动处理的聊天）显示；
+                // 未连接、已断开或终端已被手动接管时显示「连接」，保证总有重新连接的入口。
+                showConnect
                   ? h('button', {
-                    type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-primary', disabled: busy !== null,
-                    title: text(tt, 'openChatHint', '打开已建立的 SSH 会话对应的新聊天'),
-                    onClick: () => {
-                      const ready = chatReady[profile.id]
-                      // 只打开会话；提示词已在连接时复制到剪贴板，由用户自行粘贴。
-                      try { ctx.uiWorkspace.openSession(ready.sessionId) } catch { /* 保留当前页。 */ }
-                      // 切换会话后右侧栏可能被别的面板占用，重新把 SSH 服务切到最前，
-                      // 让用户回到本面板就能直接看到该主机的文件。
-                      setFsOpen(previous => ({ ...previous, [profile.id]: true }))
-                      revealPanel()
-                      setNotice(text(tt, 'promptNote', '已打开新聊天。推荐提示词在剪贴板中，粘贴到输入框后发送。'))
-                    },
-                  }, text(tt, 'openChat', '打开新聊天'))
-                  : h('button', {
                     type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-primary', disabled: busy !== null || !connectable,
                     title: connectable ? text(tt, 'connectHint', '将建立 SSH 连接并准备新聊天；已有终端会被替换。') : statusLine(profile),
                     onClick: () => void connect(profile),
-                  }, isBusy ? text(tt, 'connecting', '正在连接…') : text(tt, 'connect', '连接')),
-                chatReady[profile.id] !== undefined
+                  }, isBusy ? text(tt, 'connecting', '正在连接…') : text(tt, 'connect', '连接'))
+                  : null,
+                showOpenChat
+                  ? h('button', {
+                    type: 'button', className: `dsh-ssh-btn${showConnect ? '' : ' dsh-ssh-btn-primary'}`, disabled: busy !== null,
+                    title: text(tt, 'openChatHint', '打开已建立的 SSH 会话对应的新聊天'),
+                    onClick: () => {
+                      // 只打开会话；提示词已在连接时复制到剪贴板，由用户自行粘贴。
+                      try { ctx.uiWorkspace.openSession(chat.sessionId) } catch { /* 保留当前页。 */ }
+                      // 切换会话后右侧栏可能被别的面板占用，重新把 SSH 服务切到最前，
+                      // 让用户回到本面板就能直接看到该主机的文件。
+                      if (isAlive) setFsOpen(previous => ({ ...previous, [profile.id]: true }))
+                      revealPanel()
+                      if (chat.pending !== true) setNotice(text(tt, 'promptNote', '已打开新聊天。推荐提示词在剪贴板中，粘贴到输入框后发送。'))
+                    },
+                  }, text(tt, 'openChat', '打开新聊天'))
+                  : null,
+                showOpenChat && isAlive
                   ? h('button', {
                     type: 'button', className: 'dsh-ssh-btn', disabled: busy !== null,
                     title: text(tt, 'copyPromptHint', '复制推荐的 SSH 检查提示词到剪贴板'),
                     onClick: () => {
-                      const ready = chatReady[profile.id]
-                      const prompt = ready.prompt ?? buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
+                      const prompt = chat.prompt ?? buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
                       void (async () => {
                         const copied = await copyToClipboard(prompt)
                         if (copied) {

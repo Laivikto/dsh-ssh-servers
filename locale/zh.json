@@ -124,5 +124,10 @@
   "leaveEmpty": "可留空",
   "ipv4": "IPv4",
   "ipv6": "IPv6",
-  "ipv6Short": "IPv6"
+  "ipv6Short": "IPv6",
+  "authPending": "认证未完成",
+  "authPendingHint": "终端已打开但尚未登录成功，文件浏览与 AI 命令不可用。可在对应聊天的终端里手动完成登录，或修正凭据后重新连接。",
+  "userControl": "已手动接管",
+  "userControlHint": "你在终端里手动输入后，该终端改由你控制，插件无法再写入命令。点击「连接」可重新建立由插件控制的连接。",
+  "connectionReset": "连接目标已修改，旧连接已断开；请重新连接。"
 }

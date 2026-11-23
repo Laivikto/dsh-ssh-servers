@@ -97,7 +97,7 @@ describe('SSH 命令构造（详细）', () => {
 
   test('使用 VERBOSE 日志级别且以 ssh 开头', () => {
     // VERBOSE 保留 "Authenticated to" 供登录判定，但不打印私钥路径（debug1: Will attempt key）
-    assert.match(cmd, /^ssh -o LogLevel=VERBOSE /)
+    assert.match(cmd, /^(?:ssh|& '[^']+ssh\.exe'|"[^"]+ssh\.exe") -o LogLevel=VERBOSE /)
   })
 
   test('私钥路径不进命令', () => {
@@ -136,68 +136,98 @@ describe('工具守卫', () => {
   })
 })
 
+/**
+ * 模拟交互式 POSIX shell：回显整行输入，执行用户命令，再按 printf '\n%s %s\n' 输出哨兵。
+ * output 为用户命令的原始输出（可不以换行结尾，例如 printf abc）。
+ */
+function fakeShell({ output, exitCode = 0 }) {
+  let transcript = 'root@host:~# '
+  const writes = []
+  const terminal = {
+    id: 'run-test',
+    info: { state: 'running', control: 'agent' },
+    read() { return { text: transcript } },
+    async drain() {},
+    mark() {
+      const base = transcript.length
+      return {
+        lines() { return { lines: transcript.slice(base).split('\n'), truncated: false } },
+        dispose() {},
+      }
+    },
+    async write(data) {
+      writes.push(data)
+      if (data === '\x03') { transcript += '^C\nroot@host:~# '; return }
+      assert.equal(data.endsWith('\r'), true, '命令应以回车结尾')
+      const line = data.replace(/\r$/, '')
+      const m = /printf '\\n%s %s\\n' (__DSH_DONE_[0-9a-z_]+__) "\$\?"$/.exec(line)
+      transcript += `${line}\n`
+      if (m === null || output === null) return // 不认识的写法：模拟命令永不结束
+      transcript += output
+      transcript += `\n${m[1]} ${exitCode}\n`
+      transcript += 'root@host:~# '
+    },
+  }
+  return { terminal, writes }
+}
+
 describe('命令执行与输出捕获', () => {
   test('执行命令并通过哨兵行判定结束', async () => {
-    let transcript = ''
-    let echoCommand = ''
-    const terminal = {
-      id: 'run-test',
-      info: { state: 'running' },
-      read() { return { text: transcript } },
-      async drain() {},
-      mark() {
-        const base = transcript
-        return {
-          lines() { return { lines: transcript.slice(base.length).split('\n'), truncated: false } },
-          dispose() {},
-        }
-      },
-      async write(data) {
-        // 模拟真实 shell：执行整行（命令 + ; echo 哨兵 $?），输出命令结果与哨兵行
-        assert.equal(data.endsWith('\r'), true, '命令应以回车结尾')
-        const line = data.replace(/\r$/, '')
-        const parts = line.split('; echo ')
-        const userCommand = parts[0]
-        const sentinelExpr = parts[1] ?? ''
-        echoCommand = sentinelExpr
-        transcript += `root@host:~# ${userCommand}\nLinux dsh-test 6.1.0-test x86_64 GNU/Linux\n`
-        // 模拟 $? 展开：成功命令返回 0
-        transcript += `${sentinelExpr.replace(' $?', ' 0')}\n`
-        transcript += 'root@host:~# '
-      },
-    }
-    const output = await runAndCapture({ terminal }, 'uname -a', new AbortController().signal)
+    const { terminal, writes } = fakeShell({ output: 'Linux dsh-test 6.1.0-test x86_64 GNU/Linux\n' })
+    const output = await runAndCapture({ terminal }, 'uname -a', new AbortController().signal, { pollMs: 5 })
     assert.match(output.text, /Linux dsh-test 6\.1\.0-test/)
     assert.equal(output.exitCode, 0)
-    // 哨兵行不应出现在返回给模型的文本里
-    assert.equal(output.text.includes('__DSH_DONE_'), false, '哨兵行必须被剥离')
-    assert.match(echoCommand, /__DSH_DONE_[0-9a-f]{8}_/, '命令应附带唯一哨兵')
+    // 哨兵（包括回显命令行里的哨兵后缀）不应出现在返回给模型的文本里
+    assert.equal(output.text.includes('__DSH_DONE_'), false, '哨兵必须被剥离')
+    assert.equal(output.text.includes('printf'), false, '回显中的哨兵后缀必须被剥离')
+    assert.match(output.text, /^uname -a\n/, '保留用户命令本身的回显（不含哨兵后缀）')
+    assert.match(writes[0], /^uname -a; printf '\\n%s %s\\n' __DSH_DONE_[0-9a-f]{8}_/, '命令应附带唯一哨兵')
   })
 
   test('非零退出码会体现在返回值里', async () => {
-    let transcript = ''
-    const terminal = {
-      id: 'run-test-fail',
-      info: { state: 'running' },
-      read() { return { text: transcript } },
-      async drain() {},
-      mark() {
-        const base = transcript
-        return {
-          lines() { return { lines: transcript.slice(base.length).split('\n'), truncated: false } },
-          dispose() {},
-        }
-      },
-      async write(data) {
-        const line = data.replace(/\r$/, '')
-        const parts = line.split('; echo ')
-        const sentinelExpr = parts[1] ?? ''
-        transcript += `root@host:~# ls /no/such/dir\nls: cannot access: No such file\n`
-        transcript += `${sentinelExpr.replace(' $?', ' 2')}\n`
-        transcript += 'root@host:~# '
-      },
-    }
-    const output = await runAndCapture({ terminal }, 'ls /no/such/dir', new AbortController().signal)
+    const { terminal } = fakeShell({ output: 'ls: cannot access: No such file\n', exitCode: 2 })
+    const output = await runAndCapture({ terminal }, 'ls /no/such/dir', new AbortController().signal, { pollMs: 5 })
     assert.equal(output.exitCode, 2)
+  })
+
+  test('回归：输出末尾没有换行（printf abc）也能立即判定完成', async () => {
+    const { terminal } = fakeShell({ output: 'abc' })
+    const started = Date.now()
+    const output = await runAndCapture({ terminal }, 'printf abc', new AbortController().signal, { pollMs: 5, timeoutMs: 2000 })
+    assert.equal(output.exitCode, 0)
+    assert.match(output.text, /abc/)
+    assert.ok(Date.now() - started < 1000, '不应等到超时')
+  })
+
+  test('回归：以 & 或 ; 结尾的命令不会拼出 "&;" / ";;" 语法错误', () => {
+    const s = '__DSH_DONE_x__'
+    assert.equal(__test__.buildRunLine('sleep 5 &', s), `sleep 5 & ${__test__.sentinelSuffix(s)}`)
+    assert.equal(__test__.buildRunLine('cd /tmp;', s), `cd /tmp; ${__test__.sentinelSuffix(s)}`)
+    assert.equal(__test__.buildRunLine('a && b', s), `a && b; ${__test__.sentinelSuffix(s)}`)
+    assert.equal(__test__.buildRunLine('uptime   ', s), `uptime; ${__test__.sentinelSuffix(s)}`)
+  })
+
+  test('回归：超时后向远端发送 Ctrl+C，避免下一条命令被敲进仍在运行的程序', async () => {
+    const { terminal, writes } = fakeShell({ output: null })
+    await assert.rejects(
+      runAndCapture({ terminal }, 'top', new AbortController().signal, { pollMs: 5, timeoutMs: 60 }),
+      /Ctrl\+C/,
+    )
+    assert.equal(writes.at(-1), '\x03')
+  })
+
+  test('回归：取消时同样发送 Ctrl+C', async () => {
+    const { terminal, writes } = fakeShell({ output: null })
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 20)
+    await assert.rejects(runAndCapture({ terminal }, 'sleep 100', controller.signal, { pollMs: 5, timeoutMs: 5000 }))
+    assert.equal(writes.at(-1), '\x03')
+  })
+
+  test('回归：终端已由用户接管时给出重新连接的恢复方式，且不写入', async () => {
+    const { terminal, writes } = fakeShell({ output: '' })
+    terminal.info.control = 'user'
+    await assert.rejects(runAndCapture({ terminal }, 'uptime', new AbortController().signal), /连接|Connect/)
+    assert.equal(writes.length, 0)
   })
 })

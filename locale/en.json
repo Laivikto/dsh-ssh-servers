@@ -124,5 +124,10 @@
   "leaveEmpty": "Can be left empty",
   "ipv4": "IPv4",
   "ipv6": "IPv6",
-  "ipv6Short": "IPv6"
+  "ipv6Short": "IPv6",
+  "authPending": "Not signed in",
+  "authPendingHint": "The terminal is open but login has not succeeded, so file browsing and AI commands are unavailable. Finish logging in manually in that chat’s terminal, or fix the credentials and connect again.",
+  "userControl": "Taken over",
+  "userControlHint": "You typed in the terminal, so it is now under your control and the plugin can no longer write commands to it. Click \"Connect\" to open a new plugin-controlled connection.",
+  "connectionReset": "The connection target changed and the old connection was closed; please connect again."
 }

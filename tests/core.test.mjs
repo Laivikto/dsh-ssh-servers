@@ -72,8 +72,8 @@ describe('SSH 命令构造', () => {
     hostKeyPolicy: 'accept-new',
   }
 
-  test('以 ssh 开头', () => {
-    assert.match(buildSshCommand(params), /^ssh /)
+  test('以 ssh 开头（Windows 上为 ssh.exe 绝对路径，防当前目录劫持）', () => {
+    assert.match(buildSshCommand(params), /^(?:ssh|& '[^']+ssh\.exe'|"[^"]+ssh\.exe") /)
   })
 
   test('私钥通过环境变量传递，不出现在命令中', () => {
