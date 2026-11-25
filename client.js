@@ -11,6 +11,9 @@ window.__ModuleLoader__.load({
     const PLUGIN_ID = '@laivikto/dsh-ssh-servers'
     const TAB_KIND = 'ssh-servers'
     const STORE_KEY = 'dsh.ssh-servers.v1'
+    // 每台主机上次由插件创建的会话 id，用于从其他聊天返回。
+    // 不发消息、不消耗 token；只是记住入口，避免空白会话从列表中被过滤后找不到。
+    const SESSION_MAP_KEY = 'dsh.ssh-servers.session-map.v1'
     const MAX_PROFILES = 30
 
     const zh = {
@@ -45,6 +48,17 @@ window.__ModuleLoader__.load({
       acceptNew: '首次自动信任',
       strict: '严格校验（known_hosts）',
       hostKeyNote: '首次自动信任可一键连接，但第一次连接前无法验证主机身份；严格校验要求本机 known_hosts 已存在正确记录。',
+      fullAccess: '完全权限（跳过逐条确认）',
+      fullAccessNote: '勾选后，AI 在此主机上执行的命令不再逐条询问，直接运行。仅在你完全信任该主机与该模型时启用。',
+      fullAccessWarn: '完全权限已开启：AI 发送的命令会直接执行，不弹确认框。',
+      reopenChat: '回到上次聊天',
+      reopenHint: '回到上次为这台主机打开的聊天（内容与草稿都还在）',
+      disconnect: '断开连接',
+      disconnecting: '正在断开…',
+      disconnectHint: '断开该主机的 SSH 连接并关闭插件打开的终端',
+      disconnected: '已断开连接，终端已关闭。',
+      disconnectFailed: '断开失败',
+      disconnectNoSession: '找不到该主机的会话，无法断开。请关闭右侧终端标签。',
       addressDisplay: '地址显示',
       ipv4: 'IPv4',
       ipv6: 'IPv6',
@@ -175,6 +189,17 @@ window.__ModuleLoader__.load({
       acceptNew: 'Trust on first use',
       strict: 'Strict (known_hosts)',
       hostKeyNote: 'Trust on first use connects in one click but cannot verify the server before the first connection; strict mode requires an existing known_hosts record.',
+      fullAccess: 'Full access (skip per-command confirmation)',
+      fullAccessNote: 'When checked, commands the AI runs on this host are executed directly without a confirmation prompt. Enable only if you fully trust this host and model.',
+      fullAccessWarn: 'Full access is on: commands sent by the AI run immediately without confirmation.',
+      reopenChat: 'Back to last chat',
+      reopenHint: 'Return to the chat last opened for this host (its content and draft are still there)',
+      disconnect: 'Disconnect',
+      disconnecting: 'Disconnecting…',
+      disconnectHint: 'Disconnect this host and close the terminal opened by the plugin',
+      disconnected: 'Disconnected; the terminal has been closed.',
+      disconnectFailed: 'Disconnect failed',
+      disconnectNoSession: 'Could not find this host\'s session, so it cannot be disconnected. Close the terminal tab on the right.',
       addressDisplay: 'Show addresses',
       ipv4: 'IPv4',
       ipv6: 'IPv6',
@@ -412,12 +437,13 @@ window.__ModuleLoader__.load({
     // apply() 时绑定到 ctx.locale，并订阅切换。
     let apiLang = 'zh'
 
-    async function api(name, body) {
+    async function api(name, body, signal) {
       const response = await fetch(apiUrl(name), {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ ...(body ?? {}), lang: apiLang }),
+        signal,
       })
       let data = null
       try { data = await response.json() } catch { /* 非 JSON 响应。 */ }
@@ -528,6 +554,8 @@ window.__ModuleLoader__.load({
         passphrase: '',
         hostKeyPolicy: 'accept-new',
         addressMode: 'both',
+        // 完全权限：勾选后 AI 在该主机上的命令不再逐条确认
+        fullAccess: false,
         editing: false,
         hasPassword: false,
         hasPassphrase: false,
@@ -699,6 +727,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       __test__: { humanSize, formatTime, fileKindLabel, maskAddress },
       apply(ctx) {
         const t = ctx.locale.bind(NS)
+        // 面板随聊天重新挂载时，即使 localStorage 不可用，也能找回这一轮连接的聊天。
+        const rememberedSessions = new Map()
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ssh-servers: locale')
 
         // 语言同步：让后端按界面语言返回报错文案
@@ -768,11 +798,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
     function FileBrowserSection(props) {
       const { hostId, hostName, hostUser, hostAddr, tt: sectionT } = props
       const tt = sectionT ?? ((k, d) => d ?? k)
-      // server 只在 id 变化时重建：引用稳定，load 的依赖不再抖动
-      const server = React.useMemo(
-        () => ({ id: hostId, name: hostName, username: hostUser, host: hostAddr }),
-        [hostId, hostName, hostUser, hostAddr],
-      )
       const [path, setPath] = React.useState('/')
       const [parent, setParent] = React.useState(null)
       const [entries, setEntries] = React.useState([])
@@ -795,7 +820,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         return () => { alive.current = false }
       }, [])
 
-      // 连接状态由 HostsPanel 的心跳统一提供（server 变化即代表连接/断开）。
+      // 连接状态由 HostsPanel 的心跳统一提供。
       // 换主机时回到根目录并清掉上一台的预览与筛选。
       React.useEffect(() => {
         setPath('/')
@@ -817,7 +842,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         setError('')
         setNotice('')
         try {
-          const data = await api('fs-list', { hostId: server.id, path: targetPath })
+          const data = await api('fs-list', { hostId, path: targetPath })
           if (!alive.current || mine !== listSeq.current) return
           setPath(data.path)
           setParent(data.parent ?? null)
@@ -829,12 +854,12 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         } finally {
           if (alive.current && mine === listSeq.current) setLoading(false)
         }
-      }, [server])
+      }, [hostId])
 
       // 主机确定后自动进根目录
       React.useEffect(() => {
         void load('/')
-      }, [server.id, load])
+      }, [load])
 
       const openEntry = (entry) => {
         if (entry.type === 'dir') {
@@ -854,7 +879,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         const mine = ++previewSeq.current
         setPreviewFile({ loading: true, name: entry.name, path: full, size: entry.size })
         try {
-          const data = await api('fs-preview', { hostId: server.id, path: full })
+          const data = await api('fs-preview', { hostId, path: full })
           if (!alive.current || mine !== previewSeq.current) return
           setPreviewFile({
             loading: false,
@@ -943,7 +968,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         h('div', { className: 'dsh-fs-section-head' },
           h('div', { style: { minWidth: 0 } },
             h('h3', { className: 'dsh-fs-section-title' }, text(tt, 'fsTitle', 'SSH 服务文件')),
-            h('p', { className: 'dsh-fs-section-sub' }, server.name + ' · ' + server.username + '@' + server.host),
+            h('p', { className: 'dsh-fs-section-sub' }, `${hostName} · ${hostUser}@${hostAddr}`),
           ),
           h('button', {
             type: 'button', className: 'dsh-ssh-btn', disabled: loading,
@@ -1127,30 +1152,32 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           const keys = useMemo(() => profileKey(profiles), [profiles])
 
           useEffect(() => {
+            const hostIds = profiles.map(profile => profile.id)
+            if (hostIds.length === 0) return undefined
             let cancelled = false
+            let inFlight = false
             const pollConnections = async () => {
-              // 窗口在后台时跳过本轮，省一批 SSH 往返；回前台后下一轮会追上
-              if (typeof document !== 'undefined' && document.hidden === true) return
-              const hostIds = profiles.map((profile) => profile.id)
-              if (hostIds.length === 0) return
+              // 慢请求未完成时跳过本轮，避免心跳结果乱序覆盖。
+              if (cancelled || inFlight || (typeof document !== 'undefined' && document.hidden === true)) return
               // 单请求批量取状态：以前是每台主机串行发一次请求，N 台就是 N 个往返
+              inFlight = true
               let states = null
               const startedAt = Date.now()
               try {
-                const data = await api('connection-state', { hostIds })
+                const data = await api('connection-state', { hostIds }, AbortSignal.timeout(15000))
                 states = data?.states ?? null
               } catch {
-                states = null
+                // 整个请求失败：保持原状态，不要误判成断线。
+              } finally {
+                inFlight = false
               }
-              if (cancelled) return
-              for (const profile of profiles) {
+              if (cancelled || states === null) return
+              for (const hostId of hostIds) {
                 // 心跳发出后本面板刚连接/断开过该主机：这轮结果反映的是旧状态，跳过
-                if ((connStamp.current[profile.id] ?? 0) >= startedAt) continue
-                const state = states?.[profile.id]
+                if ((connStamp.current[hostId] ?? 0) >= startedAt) continue
+                const state = states[hostId]
                 if (state === undefined) {
-                  // 整个请求失败：保持原状态，不要误判成断线
-                  if (states === null) continue
-                  setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'unresponsive', connected: false } }))
+                  setLiveConn(previous => ({ ...previous, [hostId]: { state: 'unresponsive', connected: false } }))
                   continue
                 }
                 const alive = state.alive === true
@@ -1161,32 +1188,31 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                     : (state.reason === 'not-connected' || state.reason === 'terminal-exited'
                       ? { state: 'idle', connected: false }
                       : { state: 'unresponsive', connected: false })
-                  const current = previous[profile.id]
+                  const current = previous[hostId]
                   // 心跳每 30 秒一次，状态没变就不触发重渲染
                   if (current && current.state === next.state && (current.userControl === true) === (next.userControl === true)) return previous
-                  return { ...previous, [profile.id]: next }
+                  return { ...previous, [hostId]: next }
                 })
                 // 连接已断开：撤掉「打开新聊天」入口，让卡片恢复「连接」按钮。
                 // 认证未完成而保留的终端（pending）不受影响，用户仍可进入对应聊天手动处理。
                 if (!alive) {
                   setChatReady(previous => {
-                    const current = previous[profile.id]
+                    const current = previous[hostId]
                     if (current === undefined || current.pending === true) return previous
                     const next = { ...previous }
-                    delete next[profile.id]
+                    delete next[hostId]
                     return next
                   })
                 }
                 // 连接成功即主动展开文件区块；断开则收起，避免展示过期目录
                 setFsOpen(previous => {
                   if (alive) {
-                    if (previous[profile.id] === false) return previous // 用户手动收起过，尊重选择
-                    if (previous[profile.id] === true) return previous
-                    return { ...previous, [profile.id]: true }
+                    if (previous[hostId] !== undefined) return previous // 保留用户手动展开或收起状态
+                    return { ...previous, [hostId]: true }
                   }
-                  if (previous[profile.id] === undefined) return previous
+                  if (previous[hostId] === undefined) return previous
                   const next = { ...previous }
-                  delete next[profile.id]
+                  delete next[hostId]
                   return next
                 })
               }
@@ -1219,12 +1245,12 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           useEffect(() => {
             let cancelled = false
             const loadAddresses = async () => {
-              const entries = await Promise.all(profiles.map(async (profile) => {
-                try {
-                  return [profile.id, await api('resolve', { host: profile.host })]
-                } catch {
-                  return [profile.id, { ok: false, ipv4: [], ipv6: [] }]
+              const byHost = new Map()
+              const entries = await Promise.all(profiles.map(async ({ id, host }) => {
+                if (!byHost.has(host)) {
+                  byHost.set(host, api('resolve', { host }).catch(() => ({ ok: false, ipv4: [], ipv6: [] })))
                 }
+                return [id, await byHost.get(host)]
               }))
               if (!cancelled) setAddresses(Object.fromEntries(entries))
             }
@@ -1299,6 +1325,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             try {
               await api('credentials/delete', { hostId: profile.id })
               forgetConnection(profile.id)
+              // 主机没了，它记住的会话入口也一并清掉，避免残留指向已删除主机的按钮
+              forgetSession(profile.id)
               const next = profiles.filter(item => item.id !== profile.id)
               setProfiles(next)
               saveProfiles(next)
@@ -1377,6 +1405,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 keyPath: form.authMode === 'key' ? form.keyPath.trim() : '',
                 hostKeyPolicy: form.hostKeyPolicy,
                 addressMode: form.addressMode,
+                fullAccess: form.fullAccess === true,
                 updatedAt: Date.now(),
               }
               const next = original === undefined ? [...profiles, profile] : profiles.map(item => item.id === form.id ? { ...item, ...profile } : item)
@@ -1415,6 +1444,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   name: profile.name,
                   ...bindingOfProfile(profile),
                   sessionId: createdSession,
+                  // 完全权限偏好随连接下发：后端据此决定是否弹命令确认框
+                  fullAccess: profile.fullAccess === true,
                 })
               } catch (failure) {
                 const apiFailure = failure instanceof ApiError ? failure : undefined
@@ -1444,6 +1475,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               // 连接成功：生成检查提示并复制到系统剪贴板（不填入聊天输入框）。
               const prompt = buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
               connStamp.current[profile.id] = Date.now()
+              rememberSession(profile.id, createdSession)
               const copied = await copyToClipboard(prompt)
               setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession, prompt } }))
               setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true } }))
@@ -1463,6 +1495,82 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             }
           }
 
+          /**
+           * 记住插件为某主机创建的会话 id（持久化到 localStorage）。
+           * 宿主会把「一条消息都没发过」的会话标记为 blank：它并不删除聊天，
+           * 只是在工作区列表里只显示当前选中的那一个空白会话，其余的被过滤掉，
+           * 于是用户切走后看起来「聊天框消失了」。
+           * 发消息能解除 blank，但会触发一轮模型对话、消耗 token。
+           * 插件记住会话 id，让用户从其他聊天回到这个聊天，无需发消息。
+           */
+          const rememberSession = (hostId, sessionId) => {
+            if (typeof hostId !== 'string' || typeof sessionId !== 'string') return
+            rememberedSessions.set(hostId, sessionId)
+            try {
+              const raw = localStorage.getItem(SESSION_MAP_KEY)
+              const map = raw === null ? {} : (JSON.parse(raw) ?? {})
+              if (typeof map !== 'object' || map === null) return
+              map[hostId] = sessionId
+              localStorage.setItem(SESSION_MAP_KEY, JSON.stringify(map))
+            } catch { /* 存储不可用时只在内存里保留 */ }
+          }
+
+          /** 读回某主机上次创建的会话 id（刷新页面或重启后仍然可用）。 */
+          const readRememberedSession = (hostId) => {
+            const fallback = rememberedSessions.get(hostId)
+            try {
+              const raw = localStorage.getItem(SESSION_MAP_KEY)
+              if (raw === null) return fallback
+              const map = JSON.parse(raw)
+              const value = map?.[hostId]
+              return typeof value === 'string' ? value : fallback
+            } catch { return fallback }
+          }
+
+          /** 主机被删除时一并清掉它的会话记录，避免残留。 */
+          const forgetSession = (hostId) => {
+            rememberedSessions.delete(hostId)
+            try {
+              const raw = localStorage.getItem(SESSION_MAP_KEY)
+              if (raw === null) return
+              const map = JSON.parse(raw)
+              if (typeof map !== 'object' || map === null) return
+              delete map[hostId]
+              localStorage.setItem(SESSION_MAP_KEY, JSON.stringify(map))
+            } catch { /* 忽略 */ }
+          }
+
+          /**
+           * 主动断开通到该主机的 SSH 连接并关闭插件打开的终端。
+           * 后端按「会话」定位连接；当前聊天可能属于另一台主机。
+           */
+          const disconnect = async (profile, targetSession) => {
+            if (typeof targetSession !== 'string' || targetSession === '') {
+              setError(text(tt, 'disconnectNoSession', '找不到该主机的会话，无法断开。请关闭右侧终端标签。'))
+              return
+            }
+            setBusy(profile.id)
+            setError('')
+            setNotice('')
+            try {
+              await api('disconnect', { sessionId: targetSession })
+              forgetConnection(profile.id)
+              setNotice(text(tt, 'disconnected', '已断开连接，终端已关闭。'))
+            } catch (failure) {
+              // 后端可能因为「用户已接管终端」而拒绝；这种情况下连接其实也已撤销，
+              // 前端状态需要同步清掉，避免卡片一直显示「已连接」。
+              const apiFailure = failure instanceof ApiError ? failure : undefined
+              if (apiFailure?.data?.code === 'user-control' || apiFailure?.data?.code === 'not-connected') {
+                forgetConnection(profile.id)
+              }
+              if (mounted.current) {
+                setError(`${text(tt, 'disconnectFailed', '断开失败')}：${formatError(failure)}`)
+              }
+            } finally {
+              if (mounted.current) setBusy(null)
+            }
+          }
+
           const addressRows = (profile) => {
             const data = addresses[profile.id]
             const mode = profile.addressMode ?? 'both'
@@ -1474,6 +1582,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           }
 
           const statusLine = (profile) => {
+            // 完全权限是危险状态，优先提示，避免用户忘了自己开过
+            if (profile.fullAccess === true) return text(tt, 'fullAccessWarn', '完全权限已开启：AI 发送的命令会直接执行，不弹确认框。')
             const current = status[profile.id]
             if (current === undefined) return text(tt, 'statusUnknown', '凭据状态未知')
             if (current.failed === true) return text(tt, 'statusUnavailable', '无法读取凭据状态，请重试')
@@ -1603,6 +1713,22 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 ),
                 h('div', { className: 'dsh-ssh-note' }, text(tt, 'hostKeyNote', '首次自动信任可一键连接，但第一次连接前无法验证主机身份。')),
               ),
+              h('div', { className: 'dsh-ssh-field' },
+                h('label', {
+                  htmlFor: 'dsh-ssh-fullaccess',
+                  style: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' },
+                },
+                  h('input', {
+                    id: 'dsh-ssh-fullaccess',
+                    type: 'checkbox',
+                    checked: form.fullAccess === true,
+                    onChange: event => setField('fullAccess', event.target.checked),
+                    style: { width: 'auto', minHeight: 'auto', margin: 0, accentColor: 'var(--dsw-alias-brand-primary)' },
+                  }),
+                  text(tt, 'fullAccess', '完全权限（跳过逐条确认）'),
+                ),
+                h('div', { className: 'dsh-ssh-note' }, text(tt, 'fullAccessNote', '勾选后，AI 在此主机上执行的命令不再逐条询问，直接运行。仅在你完全信任该主机与该模型时启用。')),
+              ),
               h('div', { className: 'dsh-ssh-note' }, text(tt, 'securityNote', '密码和私钥口令只写入本机 DSH 凭据库，不会发送给模型，也不会写入聊天记录。插件不复制私钥文件。')),
               h('div', { className: 'dsh-ssh-actions' },
                 h('button', {
@@ -1644,7 +1770,14 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             const connectable = currentStatus === undefined || currentStatus.failed === true || ready
             const isAlive = liveConn[profile.id]?.state === 'alive'
             const chat = chatReady[profile.id]
-            const showOpenChat = chat !== undefined && (isAlive || chat.pending === true)
+            const rememberedSession = readRememberedSession(profile.id)
+            const connectedSession = isAlive
+              ? (chat?.pending === true ? rememberedSession : (chat?.sessionId ?? rememberedSession))
+              : undefined
+            const openChatSession = chat?.pending === true ? chat.sessionId : connectedSession
+            const showOpenChat = openChatSession !== undefined && openChatSession !== sessionId
+            const showReopenChat = chat === undefined && !isAlive
+              && rememberedSession !== undefined && rememberedSession !== sessionId
             const showConnect = !isAlive || liveConn[profile.id]?.userControl === true
             const expanded = isAlive && fsOpen[profile.id] === true
             // 已连接时渲染文件浏览区块；未连接不渲染任何占位
@@ -1737,24 +1870,35 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 showOpenChat
                   ? h('button', {
                     type: 'button', className: `dsh-ssh-btn${showConnect ? '' : ' dsh-ssh-btn-primary'}`, disabled: busy !== null,
-                    title: text(tt, 'openChatHint', '打开已建立的 SSH 会话对应的新聊天'),
+                    title: text(tt, 'openChatHint', '打开这个聊天（未发送过消息的聊天会被列表过滤，但内容和草稿都还在）'),
                     onClick: () => {
                       // 只打开会话；提示词已在连接时复制到剪贴板，由用户自行粘贴。
-                      try { ctx.uiWorkspace.openSession(chat.sessionId) } catch { /* 保留当前页。 */ }
+                      try { ctx.uiWorkspace.openSession(openChatSession) } catch { /* 保留当前页。 */ }
                       // 切换会话后右侧栏可能被别的面板占用，重新把 SSH 服务切到最前，
                       // 让用户回到本面板就能直接看到该主机的文件。
                       if (isAlive) setFsOpen(previous => ({ ...previous, [profile.id]: true }))
                       revealPanel()
-                      if (chat.pending !== true) setNotice(text(tt, 'promptNote', '已打开新聊天。推荐提示词在剪贴板中，粘贴到输入框后发送。'))
+                      if (chat?.pending !== true) setNotice(text(tt, 'promptNote', '已打开新聊天。推荐提示词在剪贴板中，粘贴到输入框后发送。'))
                     },
                   }, text(tt, 'openChat', '打开新聊天'))
                   : null,
-                showOpenChat && isAlive
+                // 刷新/重启后找回上次的聊天（入口级，不代表连接有效）
+                 showReopenChat
+                  ? h('button', {
+                    type: 'button', className: 'dsh-ssh-btn', disabled: busy !== null,
+                    title: text(tt, 'reopenHint', '回到上次为这台主机打开的聊天（内容与草稿都还在）'),
+                    onClick: () => {
+                      try { ctx.uiWorkspace.openSession(rememberedSession) } catch { /* 保留当前页。 */ }
+                      revealPanel()
+                    },
+                  }, text(tt, 'reopenChat', '回到上次聊天'))
+                  : null,
+                 connectedSession !== undefined
                   ? h('button', {
                     type: 'button', className: 'dsh-ssh-btn', disabled: busy !== null,
                     title: text(tt, 'copyPromptHint', '复制推荐的 SSH 检查提示词到剪贴板'),
                     onClick: () => {
-                      const prompt = chat.prompt ?? buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
+                       const prompt = chat?.prompt ?? buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
                       void (async () => {
                         const copied = await copyToClipboard(prompt)
                         if (copied) {
@@ -1771,6 +1915,13 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                     type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost', disabled: busy !== null,
                     onClick: () => setStatusTick(value => value + 1),
                   }, text(tt, 'retry', '重试'))
+                  : null,
+                 connectedSession !== undefined
+                  ? h('button', {
+                    type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost', disabled: busy !== null,
+                    title: text(tt, 'disconnectHint', '断开该主机的 SSH 连接并关闭插件打开的终端'),
+                     onClick: () => void disconnect(profile, connectedSession),
+                  }, busy === profile.id ? text(tt, 'disconnecting', '正在断开…') : text(tt, 'disconnect', '断开连接'))
                   : null,
                 h('span', { className: 'dsh-ssh-spacer' }),
                 h('button', {

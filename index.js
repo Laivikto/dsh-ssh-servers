@@ -1740,18 +1740,21 @@ async function fsDownloadRawHandler(ctx, req, res) {
   }
 }
 
-/**
- * 判定一台主机的当前连接状态（纯计算，不写响应）。
- * 单主机接口与批量心跳共用，避免两套逻辑漂移。
- */
+function latestConnection(current, candidate) {
+  return current === undefined || (candidate.connectedAt ?? 0) > (current.connectedAt ?? 0)
+    ? candidate : current
+}
+
 function connectionStateOf(hostId) {
-  // 同一主机理论上只有一条连接（新连接会替换旧连接）；保险起见取最新的一条。
-  let target = null
+  let target
   for (const connection of connections.values()) {
-    if (connection.hostId !== hostId) continue
-    if (target === null || (connection.connectedAt ?? 0) > (target.connectedAt ?? 0)) target = connection
+    if (connection.hostId === hostId) target = latestConnection(target, connection)
   }
-  if (target === null) {
+  return describeConnection(target)
+}
+
+function describeConnection(target) {
+  if (target === undefined) {
     return { connected: false, alive: false, reason: 'not-connected' }
   }
   const terminalState = target.terminal?.info?.state
@@ -1779,14 +1782,20 @@ async function connectionStateHandler(ctx, req, res) {
   if (!parsed.ok) return
   const body = parsed.body
 
-  // 批量心跳：一次请求返回多台主机的状态，替代前端逐个串行请求
+  // 批量心跳只扫描一次连接表，每个请求的主机只读取一次终端。
   if (Array.isArray(body.hostIds)) {
-    const states = {}
+    const targets = new Map()
     for (const raw of body.hostIds.slice(0, 50)) {
       const id = typeof raw === 'string' ? raw.trim() : ''
-      if (!ID_PATTERN.test(id)) continue
-      states[id] = connectionStateOf(id)
+      if (ID_PATTERN.test(id)) targets.set(id, undefined)
     }
+    if (targets.size !== 0) {
+      for (const connection of connections.values()) {
+        const id = connection.hostId
+        if (targets.has(id)) targets.set(id, latestConnection(targets.get(id), connection))
+      }
+    }
+    const states = Object.fromEntries(Array.from(targets, ([id, target]) => [id, describeConnection(target)]))
     return writeJson(res, 200, { ok: true, states })
   }
 

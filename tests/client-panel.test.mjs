@@ -179,6 +179,7 @@ function loadPanel(routes) {
       createElement: () => ({ setAttribute() {}, remove() {}, style: {} }),
     },
     URL,
+    AbortSignal,
     async fetch(url, init) {
       const name = String(url).replace(/^.*ssh-servers\/api\//u, '')
       const body = JSON.parse(init.body)
