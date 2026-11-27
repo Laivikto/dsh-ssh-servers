@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
 
     const zh = {
       title: 'SSH 服务',
-      description: '保存主机并建立 SSH 会话；连接后打开预填检查提示的新聊天。',
+      description: '管理常用 SSH 主机，连接后可在聊天里使用终端。',
       add: '添加主机',
       emptyTitle: '还没有主机',
       emptyBody: '添加一台SSH 服务。密码或密钥口令只保存在本机 DSH 凭据库，不会进入聊天或模型上下文。',
@@ -48,9 +48,38 @@ window.__ModuleLoader__.load({
       acceptNew: '首次自动信任',
       strict: '严格校验（known_hosts）',
       hostKeyNote: '首次自动信任可一键连接，但第一次连接前无法验证主机身份；严格校验要求本机 known_hosts 已存在正确记录。',
-      fullAccess: '完全权限（跳过逐条确认）',
-      fullAccessNote: '勾选后，AI 在此主机上执行的命令不再逐条询问，直接运行。仅在你完全信任该主机与该模型时启用。',
-      fullAccessWarn: '完全权限已开启：AI 发送的命令会直接执行，不弹确认框。',
+      commandApprovalNote: "AI 发出的 SSH 命令需要逐条确认。",
+      retryTerminalKept: "终端已保留，可在当前聊天的终端手动处理。",
+      reconnected: "原聊天已重新连接，SSH 工具已恢复。",
+      reconnect: "在原聊天中重连",
+      uploadSize: "每次选择一个文件，最多 32 MB。",
+      uploadChecking: "正在检查目标…",
+      uploadCheck: "检查目标",
+      uploadName: "远端文件名（可改名）",
+      uploadRefreshTarget: "核对目标文件",
+      uploadMissing: "目标文件未找到。",
+      uploadSizeUnknown: "目标文件存在，无法比对大小。",
+      uploadSizeMatches: "文件大小一致，内容待核对。",
+      uploadSizeMismatch: "目标文件大小与所选文件不符。",
+      uploadDone: "写入完成",
+      uploadInterrupted: "上传结果待确认。请检查目标目录。",
+      uploadPick: "选择或拖入文件",
+      uploadReplace: "确认覆盖",
+      uploadStart: "上传",
+      uploadTarget: "远端目标",
+      uploadConflict: "目标已有同名文件。请确认是否覆盖。",
+      uploadSending: "正在传给插件",
+      uploadRemote: "正在通过 SFTP 写入远端…",
+      snapshotTitle: "巡检快照",
+      snapshotServices: "服务名（选填，空格或逗号分隔）",
+      snapshotCapturing: "采集中…",
+      snapshotCapture: "采集快照",
+      snapshotCopied: "已复制快照。",
+      snapshotCopyFailed: "复制失败，请检查剪贴板权限。",
+      snapshotCopy: "复制快照",
+      snapshotDisk: "根分区使用率",
+      snapshotMemory: "已用 / 总内存",
+      snapshotLoad: "负载 1 / 5 / 15 分钟",
       reopenChat: '回到上次聊天',
       reopenHint: '回到上次为这台主机打开的聊天（内容与草稿都还在）',
       disconnect: '断开连接',
@@ -71,14 +100,14 @@ window.__ModuleLoader__.load({
       passphraseOptional: '无口令密钥或手动输入',
       needResave: '目标已变化，需重新保存连接凭据',
       statusUnknown: '凭据状态未知',
-      statusUnavailable: '无法读取凭据状态，请重试',
+      statusUnavailable: '暂时无法读取凭据状态，请重试。',
       retry: '重试',
       deleteFailed: '删除失败',
       resolvingAddress: '正在解析地址…',
       noAddressFamily: '该地址族没有记录',
       addressFailed: '地址解析失败',
       invalidPort: '端口需为 1–65535 的整数。',
-      connectHint: '将新建聊天并建立 SSH 连接；已有终端会被替换。',
+      connectHint: '建立 SSH 连接。若已有终端，将替换该终端。',
       securityNote: '密码和私钥口令只写入本机 DSH 凭据库，不会发送给模型，也不会写入聊天记录。插件不复制私钥文件。',
       required: '请填写名称、地址、端口和用户名。',
       passwordRequired: '密码认证需要填写密码。',
@@ -88,7 +117,7 @@ window.__ModuleLoader__.load({
       connectFailed: '连接失败',
       maxProfiles: '最多保存 30 台主机。',
       openPanel: '打开 SSH 服务',
-      promptNote: '已建立连接，并打开预填检查提示的新聊天。请先审阅提示，再手动发送。',
+      promptNote: '已打开 SSH 聊天。',
       keyPickUnsupported: '当前环境不支持原生文件选择，请手动填写私钥路径。',
       connectedReady: '连接已建立，终端已就绪。',
       browseKey: '浏览…',
@@ -106,9 +135,9 @@ window.__ModuleLoader__.load({
       promptCopied: '连接已建立，推荐提示词已复制到剪贴板。可直接粘贴到任意聊天。',
       promptCopiedShort: '推荐提示词已复制到剪贴板。',
       promptCopyFailed: '连接已建立，但自动复制提示词失败。可点「推荐提示词」手动复制。',
-      copyPrompt: '推荐提示词',
+      copyPrompt: '复制巡检提示词',
       copyPromptHint: '复制推荐的 SSH 检查提示词到剪贴板',
-      fsTitle: 'SSH 服务文件',
+      fsTitle: '远程文件',
       fsLoading: '加载中…',
       fsRefresh: '刷新',
       fsUp: '上一级',
@@ -132,12 +161,12 @@ window.__ModuleLoader__.load({
       maskedIp: '已隐藏部分 IP',
       authKey: '使用密钥',
       authPassword: '使用密码',
-      authHint: '两种凭据可同时保存，连接时选择用哪个。',
+      authHint: '选择连接这台主机时使用的认证方式。',
       fsPreviewLoading: '读取中…',
       fsPreviewClose: '关闭',
       fsPreviewTruncated: '文件较大，仅显示前 1 MB',
-      fsExpand: '展开文件浏览',
-      fsCollapse: '收起文件浏览',
+      fsExpand: '展开远程文件',
+      fsCollapse: '收起远程文件',
       fsConnectedBadge: '已连接',
       fsDownloaded: '已下载 {name}（{size}）',
       kindDir: '目录',
@@ -159,7 +188,7 @@ window.__ModuleLoader__.load({
 
     const en = {
       title: 'SSH',
-      description: 'Save servers and open SSH sessions; after connecting, opens a new chat with a prefilled check prompt.',
+      description: 'Manage your SSH hosts and open a terminal in chat.',
       add: 'Add server',
       emptyTitle: 'No servers yet',
       emptyBody: 'Add a host. Passwords and key passphrases stay in this machine’s DSH credential store and never enter the chat or model context.',
@@ -189,9 +218,38 @@ window.__ModuleLoader__.load({
       acceptNew: 'Trust on first use',
       strict: 'Strict (known_hosts)',
       hostKeyNote: 'Trust on first use connects in one click but cannot verify the server before the first connection; strict mode requires an existing known_hosts record.',
-      fullAccess: 'Full access (skip per-command confirmation)',
-      fullAccessNote: 'When checked, commands the AI runs on this host are executed directly without a confirmation prompt. Enable only if you fully trust this host and model.',
-      fullAccessWarn: 'Full access is on: commands sent by the AI run immediately without confirmation.',
+      commandApprovalNote: "Each SSH command from the assistant requires confirmation.",
+      retryTerminalKept: "The terminal is still open. Continue manually in this chat’s terminal.",
+      reconnected: "Reconnected in the original chat. SSH tools are available.",
+      reconnect: "Reconnect in this chat",
+      uploadSize: "Select one file, up to 32 MB.",
+      uploadChecking: "Checking destination…",
+      uploadCheck: "Check destination",
+      uploadName: "Remote file name (editable)",
+      uploadRefreshTarget: "Check destination file",
+      uploadMissing: "Destination file not found.",
+      uploadSizeUnknown: "Destination exists. File sizes could not be compared.",
+      uploadSizeMatches: "File sizes match. Contents are unverified.",
+      uploadSizeMismatch: "Destination size differs from the selected file.",
+      uploadDone: "Write complete",
+      uploadInterrupted: "Upload result needs confirmation. Check the destination folder.",
+      uploadPick: "Choose or drop a file",
+      uploadReplace: "Confirm replacement",
+      uploadStart: "Upload",
+      uploadTarget: "Remote destination",
+      uploadConflict: "A file with this name already exists. Confirm before replacing it.",
+      uploadSending: "Sending to the plugin",
+      uploadRemote: "Writing to the server via SFTP…",
+      snapshotTitle: "Health snapshot",
+      snapshotServices: "Optional services, separated by spaces or commas",
+      snapshotCapturing: "Capturing…",
+      snapshotCapture: "Capture snapshot",
+      snapshotCopied: "Snapshot copied.",
+      snapshotCopyFailed: "Could not copy. Check clipboard permissions.",
+      snapshotCopy: "Copy snapshot",
+      snapshotDisk: "Root filesystem used",
+      snapshotMemory: "Memory used / total",
+      snapshotLoad: "Load average 1 / 5 / 15 min",
       reopenChat: 'Back to last chat',
       reopenHint: 'Return to the chat last opened for this host (its content and draft are still there)',
       disconnect: 'Disconnect',
@@ -212,14 +270,14 @@ window.__ModuleLoader__.load({
       passphraseOptional: 'No-passphrase key',
       needResave: 'Target changed; save the connection credential again',
       statusUnknown: 'Credential status unknown',
-      statusUnavailable: 'Could not read credential status; retry',
+      statusUnavailable: 'Could not check credentials. Try again.',
       retry: 'Retry',
       deleteFailed: 'Delete failed',
       resolvingAddress: 'Resolving addresses…',
       noAddressFamily: 'No record for the selected address family',
       addressFailed: 'Address resolution failed',
       invalidPort: 'Port must be an integer from 1 to 65535.',
-      connectHint: 'Creates a new chat and an SSH connection; an existing terminal will be replaced.',
+      connectHint: 'Connect over SSH and replace any existing terminal.',
       securityNote: 'Passwords and key passphrases are written only to the local DSH credential store. They are never sent to the model or chat. The plugin does not copy private-key files.',
       required: 'Name, address, port and username are required.',
       passwordRequired: 'Password authentication requires a password.',
@@ -229,7 +287,7 @@ window.__ModuleLoader__.load({
       connectFailed: 'Connection failed',
       maxProfiles: 'At most 30 servers can be saved.',
       openPanel: 'Open SSH',
-      promptNote: 'Connected. A new chat was opened with a prefilled check prompt; review it before sending.',
+      promptNote: 'SSH chat opened.',
       browseKey: 'Browse…',
       browsing: 'Opening…',
       keyPickUnsupported: 'Native file picking is unavailable here. Please enter the private-key path manually.',
@@ -247,9 +305,9 @@ window.__ModuleLoader__.load({
       promptCopied: 'Connected. The suggested prompt has been copied to your clipboard — paste it into any chat.',
       promptCopiedShort: 'Suggested prompt copied to clipboard.',
       promptCopyFailed: 'Connected, but copying the suggested prompt failed. Use "Suggested prompt" to copy it manually.',
-      copyPrompt: 'Suggested prompt',
+      copyPrompt: 'Copy inspection prompt',
       copyPromptHint: 'Copy the suggested SSH review prompt to the clipboard',
-      fsTitle: 'SSH files',
+      fsTitle: 'Remote files',
       fsLoading: 'Loading…',
       fsRefresh: 'Refresh',
       fsUp: 'Up one level',
@@ -273,12 +331,12 @@ window.__ModuleLoader__.load({
       maskedIp: 'Partially hidden',
       authKey: 'Use key',
       authPassword: 'Use password',
-      authHint: 'Both credentials can be saved; pick one at connect time.',
+      authHint: 'Choose how to authenticate to this host.',
       fsPreviewLoading: 'Loading…',
       fsPreviewClose: 'Close',
       fsPreviewTruncated: 'File is large — showing the first 1 MB',
-      fsExpand: 'Show files',
-      fsCollapse: 'Hide files',
+      fsExpand: 'Show remote files',
+      fsCollapse: 'Hide remote files',
       fsConnectedBadge: 'Connected',
       fsDownloaded: 'Downloaded {name} ({size})',
       kindDir: 'Folder',
@@ -454,6 +512,104 @@ window.__ModuleLoader__.load({
       return data
     }
 
+    function uploadBinary(meta, file, onProgress) {
+      return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest()
+        request.open('POST', apiUrl('fs-upload'))
+        request.responseType = 'json'
+        request.timeout = 180_000
+        request.setRequestHeader('content-type', 'application/octet-stream')
+        request.setRequestHeader('x-dsh-ssh-upload', encodeURIComponent(JSON.stringify({ ...meta, lang: apiLang })))
+        request.upload.onprogress = event => {
+          if (event.lengthComputable && event.total > 0) onProgress(Math.round(event.loaded / event.total * 100))
+        }
+        request.upload.onload = () => onProgress(100)
+        request.onload = () => {
+          const data = request.response
+          if (request.status === 200 && data?.ok === true) resolve(data)
+          else reject(new ApiError(data?.message ?? `HTTP ${request.status}`, data))
+        }
+        request.onerror = request.ontimeout = () => reject(new ApiError('SFTP', { code: 'upload-interrupted' }))
+        request.send(file)
+      })
+    }
+
+    function rememberDockWidth(layout, panel) {
+      const column = panel?.closest('[data-rightbar-col]')
+      const frame = column?.parentElement
+      const actions = typeof layout?.setRightbar === 'function' ? layout : layout?.panels
+      if (!frame || typeof actions?.setRightbar !== 'function') return undefined
+      const key = 'dsh.ssh-servers.dock-width.v1'
+      let pointerId
+      let initialWidth = 0
+      let userResized = false
+      let frameId
+      let observer
+      const dockWidth = () => {
+        if (frame.hasAttribute('data-rightbar-fullscreen') || frame.hasAttribute('data-rightbar-collapsed')
+          || panel.checkVisibility?.({ visibilityProperty: true }) === false || panel.getBoundingClientRect().width === 0) return 0
+        return Math.round(column.getBoundingClientRect().width)
+      }
+      const save = (event) => {
+        if (event.pointerId !== pointerId || pointerId === undefined) return
+        pointerId = undefined
+        if (event.type !== 'pointerup') return
+        frameId = requestAnimationFrame(() => {
+          const width = dockWidth()
+          if (width >= 300 && width !== initialWidth) {
+            userResized = true
+            observer?.disconnect()
+            try { localStorage.setItem(key, String(width)) } catch { /* 浏览器限制本地存储。 */ }
+          }
+        })
+      }
+      const start = (event) => {
+        const handle = event.target?.closest?.('[data-side="rightbar"]')
+        if (event.button === 0 && handle && dockWidth() >= 300) {
+          initialWidth = dockWidth()
+          pointerId = event.pointerId
+        }
+      }
+      let saved = 0
+      try { saved = Number(localStorage.getItem(key)) } catch { /* 浏览器限制本地存储。 */ }
+      if (Number.isInteger(saved) && saved >= 300 && saved <= 8192) {
+        const restore = () => {
+          const current = dockWidth()
+          if (current < 300 || userResized || pointerId !== undefined) return
+          const available = Math.max(300, Math.floor(frame.clientWidth * 0.7))
+          const width = Math.min(saved, available)
+          if (width === saved) observer?.disconnect()
+          if (width === current) return
+          // 当前 DSH 的外层尺寸由 AppFrame 持有；调用原生拖拽复用的 action。
+          try { actions.setRightbar(width) } catch { /* 不同宿主版本可能未提供该内部 action。 */ }
+        }
+        if (typeof ResizeObserver === 'function') {
+          observer = new ResizeObserver(restore)
+          observer.observe(column)
+          observer.observe(panel)
+          observer.observe(frame)
+        }
+        restore()
+      }
+      frame.addEventListener('pointerdown', start, true)
+      window.addEventListener('pointerup', save, true)
+      window.addEventListener('pointercancel', save, true)
+      return () => {
+        observer?.disconnect()
+        if (frameId !== undefined) cancelAnimationFrame(frameId)
+        frame.removeEventListener('pointerdown', start, true)
+        window.removeEventListener('pointerup', save, true)
+        window.removeEventListener('pointercancel', save, true)
+      }
+    }
+
+    function storeUploadResult(key, value) {
+      try {
+        if (value === null) localStorage.removeItem(key)
+        else localStorage.setItem(key, JSON.stringify(value))
+      } catch { /* 当前面板仍会显示操作结果。 */ }
+    }
+
     function formatBytes(bytes) {
       if (!Number.isFinite(bytes) || bytes < 0) return ''
       if (bytes < 1024) return bytes + ' B'
@@ -554,8 +710,6 @@ window.__ModuleLoader__.load({
         passphrase: '',
         hostKeyPolicy: 'accept-new',
         addressMode: 'both',
-        // 完全权限：勾选后 AI 在该主机上的命令不再逐条确认
-        fullAccess: false,
         editing: false,
         hasPassword: false,
         hasPassphrase: false,
@@ -722,9 +876,9 @@ For destructive operations (deleting files, changing system config, reboot/shutd
     }
 
     return {
-      inject: ['slots', 'locale', 'sessions', 'conversation', 'uiWorkspace', 'sidebarRight', 'sidebarRightTabs'],
+      inject: ['slots', 'locale', 'sessions', 'conversation', 'uiWorkspace', 'sidebarRight', 'sidebarRightTabs', 'layout'],
       // 纯函数出口：仅供单元测试加载真实实现，宿主加载器只读 inject/apply。
-      __test__: { humanSize, formatTime, fileKindLabel, maskAddress },
+      __test__: { humanSize, formatTime, fileKindLabel, maskAddress, rememberDockWidth },
       apply(ctx) {
         const t = ctx.locale.bind(NS)
         // 面板随聊天重新挂载时，即使 localStorage 不可用，也能找回这一轮连接的聊天。
@@ -796,7 +950,9 @@ For destructive operations (deleting files, changing system config, reboot/shutd
      * 触发「切眼睛图标就跳回根目录」的回归。
      */
     function FileBrowserSection(props) {
-      const { hostId, hostName, hostUser, hostAddr, tt: sectionT } = props
+      const { hostId, hostName, hostUser, hostAddr, canUpload, bindingKey, tt: sectionT } = props
+      const directoryKey = `dsh.ssh-servers.last-directory.v1:${bindingKey ?? hostId}`
+      const recoveryKey = `dsh.ssh-servers.pending-upload.v1:${bindingKey ?? hostId}`
       const tt = sectionT ?? ((k, d) => d ?? k)
       const [path, setPath] = React.useState('/')
       const [parent, setParent] = React.useState(null)
@@ -806,6 +962,19 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       const [notice, setNotice] = React.useState('')
       const [filter, setFilter] = React.useState('')
       const [previewFile, setPreviewFile] = React.useState(null)
+      const [selectedUpload, setSelectedUpload] = React.useState(null)
+      const [uploadProgress, setUploadProgress] = React.useState(null)
+      const [verifyingUpload, setVerifyingUpload] = React.useState(false)
+      const [uncertainUpload, setUncertainUpload] = React.useState(() => {
+        try {
+          const record = JSON.parse(localStorage.getItem(recoveryKey))
+          if (typeof record?.directory === 'string' && typeof record?.name === 'string') return record
+        } catch { /* 浏览器限制本地存储。 */ }
+        return null
+      })
+      const fileInput = React.useRef(null)
+      const uploading = React.useRef(false)
+      const uploadCheckSeq = React.useRef(0)
       // 预览请求序号：防止先发后到的响应覆盖当前选择
       const previewSeq = React.useRef(0)
       // 目录请求序号：快速连续切换目录时，先发后到的旧响应不能覆盖当前目录
@@ -845,21 +1014,92 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           const data = await api('fs-list', { hostId, path: targetPath })
           if (!alive.current || mine !== listSeq.current) return
           setPath(data.path)
+          try { localStorage.setItem(directoryKey, data.path) } catch { /* 本地存储不可用。 */ }
           setParent(data.parent ?? null)
           setEntries(Array.isArray(data.entries) ? data.entries : [])
+          return true
         } catch (reason) {
           if (!alive.current || mine !== listSeq.current) return
           setError(reason instanceof ApiError ? reason.message : String(reason))
           setEntries([])
+          if (reason instanceof ApiError && reason.data?.code === 'dir-unreadable') return 'unreadable'
         } finally {
           if (alive.current && mine === listSeq.current) setLoading(false)
         }
-      }, [hostId])
+      }, [hostId, directoryKey])
 
-      // 主机确定后自动进根目录
+      const checkUpload = async (item) => {
+        const mine = ++uploadCheckSeq.current
+        setSelectedUpload({ ...item, checking: true, remote: null })
+        setError('')
+        try {
+          const remote = await api('fs-upload/check', { hostId, directory: item.directory, name: item.name }, AbortSignal.timeout(20_000))
+          if (alive.current && mine === uploadCheckSeq.current) setSelectedUpload({ ...item, checking: false, remote })
+        } catch (reason) {
+          if (!alive.current || mine !== uploadCheckSeq.current) return
+          setSelectedUpload({ ...item, checking: false, remote: null })
+          setError(formatError(reason))
+        }
+      }
+
+      const selectUpload = (files) => {
+        if (!canUpload || loading || uploading.current || uncertainUpload !== null || files.length === 0) return
+        uploadCheckSeq.current++
+        setSelectedUpload(null)
+        setError('')
+        setNotice('')
+        if (files.length !== 1 || files[0].size > 32 * 1024 * 1024) {
+          setError(text(tt, 'uploadSize', '每次选择一个文件，最多 32 MB。'))
+          return
+        }
+        void checkUpload({ file: files[0], name: files[0].name, directory: path })
+      }
+
+      const upload = async () => {
+        if (selectedUpload?.remote == null || uploading.current || uncertainUpload !== null) return
+        const { file, directory, name, remote } = selectedUpload
+        const requestedList = listSeq.current
+        uploading.current = true
+        setError('')
+        setUploadProgress(0)
+        const pending = { directory, name, size: file.size }
+        storeUploadResult(recoveryKey, pending)
+        try {
+          const result = await uploadBinary({ hostId, directory, name, overwrite: remote.exists === true }, file, progress => {
+            if (alive.current) setUploadProgress(progress)
+          })
+          storeUploadResult(recoveryKey, null)
+          if (!alive.current) return
+          setSelectedUpload(null)
+          if (requestedList === listSeq.current) await load(directory)
+          if (alive.current) setNotice(`${text(tt, 'uploadDone', '写入完成')} ${result.path}`)
+        } catch (reason) {
+          const code = reason instanceof ApiError ? reason.data?.code : undefined
+          const unknown = code === 'upload-interrupted' || code === 'upload-result-unknown'
+          if (!unknown) storeUploadResult(recoveryKey, null)
+          if (!alive.current) return
+          if (code === 'upload-conflict') {
+            await checkUpload(selectedUpload)
+          } else {
+            setSelectedUpload({ ...selectedUpload, remote: null })
+            if (unknown) setUncertainUpload(pending)
+            else setError(formatError(reason))
+          }
+        } finally {
+          uploading.current = false
+          if (alive.current) setUploadProgress(null)
+        }
+      }
+
       React.useEffect(() => {
-        void load('/')
-      }, [load])
+        let directory = '/'
+        try { directory = localStorage.getItem(directoryKey) || '/' } catch { /* 本地存储不可用。 */ }
+        let cancelled = false
+        void load(directory).then(result => {
+          if (!cancelled && directory !== '/' && result === 'unreadable') void load('/')
+        })
+        return () => { cancelled = true }
+      }, [load, directoryKey])
 
       const openEntry = (entry) => {
         if (entry.type === 'dir') {
@@ -987,6 +1227,63 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           }, '↑'),
           h('code', { className: 'dsh-fs-path', title: path }, path),
         ),
+        canUpload ? h('div', {
+          className: 'dsh-ssh-field',
+          onDragOver: event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault() },
+          onDrop: event => { event.preventDefault(); selectUpload(event.dataTransfer.files) },
+        },
+          h('input', { ref: fileInput, type: 'file', style: { display: 'none' }, onChange: event => {
+            selectUpload(event.target.files)
+            event.target.value = ''
+          } }),
+          h('div', { className: 'dsh-ssh-actions' },
+            h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: loading || uploadProgress !== null || uncertainUpload !== null,
+              onClick: () => fileInput.current?.click() }, text(tt, 'uploadPick', '选择或拖入文件')),
+            selectedUpload !== null && uploadProgress === null && uncertainUpload === null ? h('button', {
+              type: 'button', className: 'dsh-ssh-btn', disabled: selectedUpload.checking || selectedUpload.name === '',
+              onClick: () => selectedUpload.remote === null ? void checkUpload(selectedUpload) : void upload(),
+            }, selectedUpload.checking ? text(tt, 'uploadChecking', '正在检查目标…') : selectedUpload.remote === null
+              ? text(tt, 'uploadCheck', '检查目标') : selectedUpload.remote.exists === true
+                ? text(tt, 'uploadReplace', '确认覆盖') : text(tt, 'uploadStart', '上传')) : null,
+            selectedUpload !== null && uploadProgress === null && uncertainUpload === null ? h('button', { type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost',
+              onClick: () => { uploadCheckSeq.current++; setSelectedUpload(null) } }, text(tt, 'cancel', '取消')) : null,
+          ),
+          selectedUpload !== null ? h('p', { className: 'dsh-ssh-note', style: { overflowWrap: 'anywhere' } },
+            `${text(tt, 'uploadTarget', '远端目标')} ${selectedUpload.directory.replace(/\/$/u, '')}/${selectedUpload.name}`) : null,
+          selectedUpload !== null && uploadProgress === null && uncertainUpload === null ? h('label', { className: 'dsh-ssh-note' },
+            text(tt, 'uploadName', '远端文件名（可改名）'), h('input', { type: 'text', value: selectedUpload.name, maxLength: 255,
+              onChange: event => { uploadCheckSeq.current++; setSelectedUpload({ ...selectedUpload, name: event.target.value, remote: null, checking: false }) },
+            })) : null,
+          selectedUpload?.remote?.exists && uploadProgress === null ? h('p', { className: 'dsh-ssh-note', role: 'status' },
+            text(tt, 'uploadConflict', '目标已有同名文件。请确认是否覆盖。'),
+            Number.isFinite(selectedUpload.remote.size) ? ` · ${formatBytes(selectedUpload.remote.size)}` : '') : null,
+          uploadProgress !== null ? h('p', { className: 'dsh-ssh-note', role: 'status' }, uploadProgress < 100
+            ? `${text(tt, 'uploadSending', '正在传给插件')} ${uploadProgress}%`
+            : text(tt, 'uploadRemote', '正在通过 SFTP 写入远端…')) : null,
+          uncertainUpload !== null ? h('div', { className: 'dsh-ssh-banner', role: 'alert' },
+            h('span', null, `${text(tt, 'uploadInterrupted', '上传结果待确认。请检查目标目录。')} ${uncertainUpload.name}`),
+            h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: loading || verifyingUpload, onClick: async () => {
+              if (verifyingUpload) return
+              setVerifyingUpload(true)
+              try {
+                const result = await api('fs-upload/check', { hostId, directory: uncertainUpload.directory, name: uncertainUpload.name, verify: true })
+                if (!alive.current) return
+                const key = !result.exists ? 'uploadMissing'
+                  : !Number.isSafeInteger(result.size) || !Number.isSafeInteger(uncertainUpload.size) ? 'uploadSizeUnknown'
+                    : result.size === uncertainUpload.size ? 'uploadSizeMatches' : 'uploadSizeMismatch'
+                setError('')
+                setNotice(`${text(tt, key, zh[key])} ${uncertainUpload.name}`)
+                storeUploadResult(recoveryKey, null)
+                setUncertainUpload(null)
+                setSelectedUpload(null)
+              } catch (reason) {
+                if (alive.current) setError(formatError(reason))
+              } finally {
+                if (alive.current) setVerifyingUpload(false)
+              }
+            } }, text(tt, 'uploadRefreshTarget', '核对目标文件')),
+          ) : null,
+        ) : null,
         h('div', { className: 'dsh-fs-toolbar' },
           h('input', {
             className: 'dsh-fs-filter', value: filter, spellCheck: false,
@@ -1110,6 +1407,67 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       )
     }
 
+    function SnapshotPanel({ hostId, storageKey, tt }) {
+      const [history, setHistory] = React.useState(() => {
+        try { return JSON.parse(localStorage.getItem(storageKey)) ?? {} } catch { return {} }
+      })
+      const [serviceText, setServiceText] = React.useState(typeof history.serviceText === 'string' ? history.serviceText : '')
+      const [busy, setBusy] = React.useState(false)
+      const [feedback, setFeedback] = React.useState('')
+
+      const capture = async () => {
+        setBusy(true)
+        setFeedback('')
+        try {
+          const services = serviceText.split(/[\s,，]+/u).filter(Boolean)
+          const data = await api('snapshot', { hostId, services })
+          const next = { previous: history.latest, latest: data.snapshot, serviceText }
+          setHistory(next)
+          try { localStorage.setItem(storageKey, JSON.stringify(next)) } catch { /* 当前面板仍保留快照。 */ }
+        } catch (error) { setFeedback(formatError(error)) }
+        finally { setBusy(false) }
+      }
+
+      const linesFor = (snapshot) => {
+        if (snapshot === undefined || !Array.isArray(snapshot.load) || !Array.isArray(snapshot.services)) return new Map()
+        const used = (snapshot.memoryTotalKiB - snapshot.memoryAvailableKiB) * 1024
+        return new Map([
+          [text(tt, 'snapshotDisk', '根分区使用率'), `${snapshot.diskUsedPercent}%`],
+          [text(tt, 'snapshotMemory', '已用 / 总内存'), `${formatBytes(used)} / ${formatBytes(snapshot.memoryTotalKiB * 1024)}`],
+          [text(tt, 'snapshotLoad', '负载 1 / 5 / 15 分钟'), snapshot.load.map(value => Number(value).toFixed(2)).join(' / ')],
+          ...snapshot.services.map(unit => [unit.name, unit.state]),
+        ])
+      }
+      const before = linesFor(history.previous)
+      const now = linesFor(history.latest)
+      const report = Array.from(now, ([label, value]) => {
+        const old = before.get(label)
+        return `${label}  ${old !== undefined && old !== value ? `${old} → ` : ''}${value}`
+      }).join('\n')
+
+      return h('details', { className: 'dsh-ssh-field' },
+        h('summary', { className: 'dsh-ssh-note', style: { cursor: 'pointer' } }, text(tt, 'snapshotTitle', '巡检快照')),
+        h('label', { className: 'dsh-ssh-note' }, text(tt, 'snapshotServices', '服务名（选填，空格或逗号分隔）'),
+          h('input', { type: 'text', value: serviceText, placeholder: 'nginx.service ssh.service', maxLength: 800,
+            onChange: event => setServiceText(event.target.value), disabled: busy }),
+        ),
+        h('div', { className: 'dsh-ssh-actions' },
+          h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: busy, onClick: () => void capture() },
+            busy ? text(tt, 'snapshotCapturing', '采集中…') : text(tt, 'snapshotCapture', '采集快照')),
+          report !== '' ? h('button', { type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-ghost', onClick: async () => {
+            const copied = await copyToClipboard(`${text(tt, 'snapshotTitle', '巡检快照')}\n${report}`)
+            setFeedback(copied ? text(tt, 'snapshotCopied', '已复制快照。') : text(tt, 'snapshotCopyFailed', '复制失败，请检查剪贴板权限。'))
+          } }, text(tt, 'snapshotCopy', '复制快照')) : null,
+        ),
+        report !== '' ? h('div', null,
+          h('div', { className: 'dsh-ssh-note' }, [history.previous?.capturedAt, history.latest?.capturedAt]
+            .filter(Number.isFinite).map(time => new Date(time).toLocaleString()).join(' → ')),
+          h('pre', { className: 'dsh-ssh-note', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, report),
+        ) : null,
+        feedback !== '' ? h('div', { className: 'dsh-ssh-note', role: 'status' }, feedback) : null,
+      )
+    }
+
     function HostsPanel(props) {
           const {
             sessionId, useWorkspaces, t: panelT,
@@ -1134,14 +1492,26 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           const [pendingDelete, setPendingDelete] = useState(null)
           const [keyPick, setKeyPick] = useState({ open: false, loading: false, dir: '', files: [] })
           const [liveConn, setLiveConn] = useState({})
-          // 文件浏览区块展开/收起：连接成功后自动展开，用户可手动收起来
-          const [fsOpen, setFsOpen] = useState({})
+          const [fsOpen, setFsOpen] = useState(() => {
+            try { return new Set(JSON.parse(localStorage.getItem('dsh.ssh-servers.expanded-files.v1') ?? '[]')) }
+            catch { return new Set() }
+          })
+          const setFilesExpanded = (hostId, expanded) => {
+            const next = new Set(fsOpen)
+            if (expanded) next.add(hostId)
+            else next.delete(hostId)
+            setFsOpen(next)
+            try { localStorage.setItem('dsh.ssh-servers.expanded-files.v1', JSON.stringify([...next])) }
+            catch { /* 本地存储不可用时仍保留当前面板的选择。 */ }
+          }
           // 每台主机的 IP 是否明文显示（默认打码）
           const [eyeOpen, setEyeOpen] = useState({})
           const [chatReady, setChatReady] = useState({})
           // 每台主机最近一次「本面板改变连接状态」的时间：早于它发出的心跳结果已过时，不能覆盖新状态
           const connStamp = useRef({})
           const mounted = useRef(true)
+          const panelRoot = useRef(null)
+          useEffect(() => rememberDockWidth(ctx.layout, panelRoot.current), [])
           // 挂载时显式置 true：StrictMode 会「挂载→清理→再挂载」，
           // 只在清理里置 false 会让第二次挂载后一直认为已卸载，
           // 连接按钮会永远卡在「正在连接…」。
@@ -1149,9 +1519,16 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             mounted.current = true
             return () => { mounted.current = false }
           }, [])
+          const [refreshReady, setRefreshReady] = useState(() => typeof window.requestIdleCallback !== 'function')
+          useEffect(() => {
+            if (typeof window.requestIdleCallback !== 'function') return
+            const id = window.requestIdleCallback(() => setRefreshReady(true), { timeout: 1000 })
+            return () => window.cancelIdleCallback(id)
+          }, [])
           const keys = useMemo(() => profileKey(profiles), [profiles])
 
           useEffect(() => {
+            if (!refreshReady) return
             const hostIds = profiles.map(profile => profile.id)
             if (hostIds.length === 0) return undefined
             let cancelled = false
@@ -1184,13 +1561,13 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 const userControl = alive && state.control === 'user'
                 setLiveConn(previous => {
                   const next = alive
-                    ? { state: 'alive', connected: true, userControl }
+                    ? { state: 'alive', connected: true, userControl, sessionId: state.sessionId }
                     : (state.reason === 'not-connected' || state.reason === 'terminal-exited'
                       ? { state: 'idle', connected: false }
                       : { state: 'unresponsive', connected: false })
                   const current = previous[hostId]
                   // 心跳每 30 秒一次，状态没变就不触发重渲染
-                  if (current && current.state === next.state && (current.userControl === true) === (next.userControl === true)) return previous
+                  if (current && current.state === next.state && (current.userControl === true) === (next.userControl === true) && current.sessionId === next.sessionId) return previous
                   return { ...previous, [hostId]: next }
                 })
                 // 连接已断开：撤掉「打开新聊天」入口，让卡片恢复「连接」按钮。
@@ -1204,29 +1581,25 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                     return next
                   })
                 }
-                // 连接成功即主动展开文件区块；断开则收起，避免展示过期目录
-                setFsOpen(previous => {
-                  if (alive) {
-                    if (previous[hostId] !== undefined) return previous // 保留用户手动展开或收起状态
-                    return { ...previous, [hostId]: true }
-                  }
-                  if (previous[hostId] === undefined) return previous
-                  const next = { ...previous }
-                  delete next[hostId]
-                  return next
-                })
               }
             }
             void pollConnections()
             // 每 30 秒后台探测一次（与主机卡片的心跳共用同一轮）
             const timer = setInterval(() => { void pollConnections() }, 30000)
-            return () => { cancelled = true; clearInterval(timer) }
-          }, [keys])
+            document.addEventListener?.('visibilitychange', pollConnections)
+            return () => {
+              cancelled = true
+              clearInterval(timer)
+              document.removeEventListener?.('visibilitychange', pollConnections)
+            }
+          }, [keys, refreshReady])
 
           useEffect(() => {
             let cancelled = false
+            if (!refreshReady) return
             const loadStatuses = async () => {
               for (const profile of profiles) {
+                if (cancelled) return
                 try {
                   const data = await api('credentials/status', {
                     hostId: profile.id,
@@ -1240,13 +1613,17 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             }
             void loadStatuses()
             return () => { cancelled = true }
-          }, [keys, statusTick])
+          }, [keys, statusTick, refreshReady])
 
           useEffect(() => {
             let cancelled = false
+            if (!refreshReady) return
             const loadAddresses = async () => {
               const byHost = new Map()
               const entries = await Promise.all(profiles.map(async ({ id, host }) => {
+                if (/^(?:\d{1,3}\.){3}\d{1,3}$/u.test(host) && host.split('.').every(n => String(Number(n)) === n && Number(n) <= 255)) {
+                  return [id, { ipv4: [host], ipv6: [] }]
+                }
                 if (!byHost.has(host)) {
                   byHost.set(host, api('resolve', { host }).catch(() => ({ ok: false, ipv4: [], ipv6: [] })))
                 }
@@ -1256,7 +1633,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             }
             if (profiles.length > 0) void loadAddresses()
             return () => { cancelled = true }
-          }, [keys])
+          }, [keys, refreshReady])
 
           /** 清掉某台主机与「当前连接」绑定的界面状态（连接目标变化、删除主机时使用）。 */
           const forgetConnection = (hostId) => {
@@ -1269,7 +1646,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             }
             setChatReady(without)
             setLiveConn(without)
-            setFsOpen(without)
           }
 
           const setField = (name, value) => setForm(current => current === null ? current : ({ ...current, [name]: value }))
@@ -1327,6 +1703,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               forgetConnection(profile.id)
               // 主机没了，它记住的会话入口也一并清掉，避免残留指向已删除主机的按钮
               forgetSession(profile.id)
+              setFilesExpanded(profile.id, false)
               const next = profiles.filter(item => item.id !== profile.id)
               setProfiles(next)
               saveProfiles(next)
@@ -1405,7 +1782,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 keyPath: form.authMode === 'key' ? form.keyPath.trim() : '',
                 hostKeyPolicy: form.hostKeyPolicy,
                 addressMode: form.addressMode,
-                fullAccess: form.fullAccess === true,
                 updatedAt: Date.now(),
               }
               const next = original === undefined ? [...profiles, profile] : profiles.map(item => item.id === form.id ? { ...item, ...profile } : item)
@@ -1428,15 +1804,19 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             }
           }
 
-          const connect = async (profile) => {
+          const connect = async (profile, reconnectSession) => {
             setBusy(profile.id)
             setError('')
             setNotice('')
             let createdSession
             let keepSession = false
             try {
-              const created = await ctx.sessions.create(workspaceId === undefined ? {} : { workspaceId })
-              createdSession = typeof created === 'string' ? created : created?.sessionId
+              if (reconnectSession === undefined) {
+                const created = await ctx.sessions.create(workspaceId === undefined ? {} : { workspaceId })
+                createdSession = typeof created === 'string' ? created : created?.sessionId
+              } else {
+                createdSession = reconnectSession
+              }
               if (typeof createdSession !== 'string') throw new Error(text(tt, 'noSessionId', '新聊天没有返回会话 ID。'))
               try {
                 await api('connect', {
@@ -1444,8 +1824,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   name: profile.name,
                   ...bindingOfProfile(profile),
                   sessionId: createdSession,
-                  // 完全权限偏好随连接下发：后端据此决定是否弹命令确认框
-                  fullAccess: profile.fullAccess === true,
                 })
               } catch (failure) {
                 const apiFailure = failure instanceof ApiError ? failure : undefined
@@ -1459,14 +1837,11 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   connStamp.current[profile.id] = Date.now()
                   setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession, pending: true } }))
                   setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'pending', connected: false } }))
-                  setFsOpen(previous => {
-                    if (previous[profile.id] === undefined) return previous
-                    const next = { ...previous }
-                    delete next[profile.id]
-                    return next
-                  })
                   revealPanel()
-                  setError(`${apiFailure.message}\n${text(tt, 'terminalKept', '终端已保留；可点「打开新聊天」进入对应聊天手动处理。')}`)
+                  const hint = createdSession === sessionId
+                    ? text(tt, 'retryTerminalKept', '终端已保留，可在当前聊天的终端手动处理。')
+                    : text(tt, 'terminalKept', '终端已保留；可点「打开新聊天」进入对应聊天手动处理。')
+                  setError(`${apiFailure.message}\n${hint}`)
                   return
                 }
                 throw failure
@@ -1476,17 +1851,17 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               const prompt = buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
               connStamp.current[profile.id] = Date.now()
               rememberSession(profile.id, createdSession)
-              const copied = await copyToClipboard(prompt)
+              const copied = reconnectSession === undefined && await copyToClipboard(prompt)
               setChatReady(previous => ({ ...previous, [profile.id]: { sessionId: createdSession, prompt } }))
-              setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true } }))
-              // 连接成功即展开文件浏览并切到本面板，让用户直接看到主机与文件
-              setFsOpen(previous => ({ ...previous, [profile.id]: true }))
+              setLiveConn(previous => ({ ...previous, [profile.id]: { state: 'alive', connected: true, sessionId: createdSession } }))
               revealPanel()
-              setNotice(copied
+              setNotice(reconnectSession !== undefined
+                ? `${text(tt, 'reconnected', '原聊天已重新连接，SSH 工具已恢复。')} · ${profile.name}`
+                : copied
                 ? text(tt, 'promptCopied', '连接已建立，推荐提示词已复制到剪贴板。可直接粘贴到任意聊天。')
                 : text(tt, 'promptCopyFailed', '连接已建立，但自动复制提示词失败。可点「推荐提示词」手动复制。'))
             } catch (failure) {
-              if (createdSession !== undefined && !keepSession) {
+              if (reconnectSession === undefined && createdSession !== undefined && !keepSession) {
                 try { await ctx.uiWorkspace.archiveSession(createdSession) } catch { /* 已打开或无法归档。 */ }
               }
               if (mounted.current) setError(`${text(tt, 'connectFailed', '连接失败')}：${formatError(failure)}`)
@@ -1571,19 +1946,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             }
           }
 
-          const addressRows = (profile) => {
-            const data = addresses[profile.id]
-            const mode = profile.addressMode ?? 'both'
-            if (!data) return []
-            const rows = []
-            if (mode !== 'ipv6') for (const address of data.ipv4 ?? []) rows.push(['IPv4', address])
-            if (mode !== 'ipv4') for (const address of data.ipv6 ?? []) rows.push(['IPv6', address])
-            return rows
-          }
-
           const statusLine = (profile) => {
-            // 完全权限是危险状态，优先提示，避免用户忘了自己开过
-            if (profile.fullAccess === true) return text(tt, 'fullAccessWarn', '完全权限已开启：AI 发送的命令会直接执行，不弹确认框。')
             const current = status[profile.id]
             if (current === undefined) return text(tt, 'statusUnknown', '凭据状态未知')
             if (current.failed === true) return text(tt, 'statusUnavailable', '无法读取凭据状态，请重试')
@@ -1713,22 +2076,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 ),
                 h('div', { className: 'dsh-ssh-note' }, text(tt, 'hostKeyNote', '首次自动信任可一键连接，但第一次连接前无法验证主机身份。')),
               ),
-              h('div', { className: 'dsh-ssh-field' },
-                h('label', {
-                  htmlFor: 'dsh-ssh-fullaccess',
-                  style: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' },
-                },
-                  h('input', {
-                    id: 'dsh-ssh-fullaccess',
-                    type: 'checkbox',
-                    checked: form.fullAccess === true,
-                    onChange: event => setField('fullAccess', event.target.checked),
-                    style: { width: 'auto', minHeight: 'auto', margin: 0, accentColor: 'var(--dsw-alias-brand-primary)' },
-                  }),
-                  text(tt, 'fullAccess', '完全权限（跳过逐条确认）'),
-                ),
-                h('div', { className: 'dsh-ssh-note' }, text(tt, 'fullAccessNote', '勾选后，AI 在此主机上执行的命令不再逐条询问，直接运行。仅在你完全信任该主机与该模型时启用。')),
-              ),
+              h('div', { className: 'dsh-ssh-note' }, text(tt, 'commandApprovalNote', 'AI 发出的 SSH 命令需要逐条确认。')),
               h('div', { className: 'dsh-ssh-note' }, text(tt, 'securityNote', '密码和私钥口令只写入本机 DSH 凭据库，不会发送给模型，也不会写入聊天记录。插件不复制私钥文件。')),
               h('div', { className: 'dsh-ssh-actions' },
                 h('button', {
@@ -1760,8 +2108,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           }
 
           const renderCard = (profile) => {
-            const rows = addressRows(profile)
-            const addressData = addresses[profile.id]
             const isBusy = busy === profile.id
             const currentStatus = status[profile.id]
             const ready = currentStatus !== undefined
@@ -1772,14 +2118,17 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             const chat = chatReady[profile.id]
             const rememberedSession = readRememberedSession(profile.id)
             const connectedSession = isAlive
-              ? (chat?.pending === true ? rememberedSession : (chat?.sessionId ?? rememberedSession))
+              ? (liveConn[profile.id]?.sessionId ?? (chat?.pending === true ? rememberedSession : (chat?.sessionId ?? rememberedSession)))
               : undefined
             const openChatSession = chat?.pending === true ? chat.sessionId : connectedSession
             const showOpenChat = openChatSession !== undefined && openChatSession !== sessionId
             const showReopenChat = chat === undefined && !isAlive
               && rememberedSession !== undefined && rememberedSession !== sessionId
             const showConnect = !isAlive || liveConn[profile.id]?.userControl === true
-            const expanded = isAlive && fsOpen[profile.id] === true
+            const reconnectSession = typeof sessionId === 'string' && (openChatSession === sessionId || rememberedSession === sessionId)
+              ? sessionId
+              : undefined
+            const expanded = isAlive && fsOpen.has(profile.id)
             // 已连接时渲染文件浏览区块；未连接不渲染任何占位
             const fileBlock = isAlive
               ? h('div', { className: 'dsh-ssh-fs-wrap' },
@@ -1790,7 +2139,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   title: expanded
                     ? text(tt, 'fsCollapse', '收起文件浏览')
                     : text(tt, 'fsExpand', '展开文件浏览'),
-                  onClick: () => setFsOpen((prev) => ({ ...prev, [profile.id]: !expanded })),
+                  onClick: () => setFilesExpanded(profile.id, !expanded),
                 },
                   h('span', { className: 'dsh-ssh-fs-caret' }, expanded ? '▾' : '▸'),
                   text(tt, 'fsTitle', 'SSH 服务文件'),
@@ -1798,10 +2147,13 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 ),
                 expanded
                   ? h(FileBrowserSection, {
+                    key: profileKey([profile]),
                     hostId: profile.id,
                     hostName: profile.name,
                     hostUser: profile.username,
                     hostAddr: profile.host,
+                    canUpload: profile.authMode === 'key',
+                    bindingKey: profileKey([profile]),
                     tt,
                   })
                   : null,
@@ -1857,6 +2209,10 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 ),
               ),
               h('div', { className: 'dsh-ssh-note' }, statusLine(profile)),
+              isAlive && profile.authMode === 'key' ? h(SnapshotPanel, {
+                key: profileKey([profile]), hostId: profile.id, tt,
+                storageKey: `dsh.ssh-servers.snapshots.v1:${profileKey([profile])}`,
+              }) : null,
               h('div', { className: 'dsh-ssh-actions' },
                 // 「打开新聊天」只对仍然有效的连接（或认证未完成、终端保留待手动处理的聊天）显示；
                 // 未连接、已断开或终端已被手动接管时显示「连接」，保证总有重新连接的入口。
@@ -1864,8 +2220,9 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   ? h('button', {
                     type: 'button', className: 'dsh-ssh-btn dsh-ssh-btn-primary', disabled: busy !== null || !connectable,
                     title: connectable ? text(tt, 'connectHint', '将建立 SSH 连接并准备新聊天；已有终端会被替换。') : statusLine(profile),
-                    onClick: () => void connect(profile),
-                  }, isBusy ? text(tt, 'connecting', '正在连接…') : text(tt, 'connect', '连接'))
+                    onClick: () => void connect(profile, reconnectSession),
+                  }, isBusy ? text(tt, 'connecting', '正在连接…') : reconnectSession === undefined
+                    ? text(tt, 'connect', '连接') : text(tt, 'reconnect', '在原聊天中重连'))
                   : null,
                 showOpenChat
                   ? h('button', {
@@ -1874,9 +2231,6 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                     onClick: () => {
                       // 只打开会话；提示词已在连接时复制到剪贴板，由用户自行粘贴。
                       try { ctx.uiWorkspace.openSession(openChatSession) } catch { /* 保留当前页。 */ }
-                      // 切换会话后右侧栏可能被别的面板占用，重新把 SSH 服务切到最前，
-                      // 让用户回到本面板就能直接看到该主机的文件。
-                      if (isAlive) setFsOpen(previous => ({ ...previous, [profile.id]: true }))
                       revealPanel()
                       if (chat?.pending !== true) setNotice(text(tt, 'promptNote', '已打开新聊天。推荐提示词在剪贴板中，粘贴到输入框后发送。'))
                     },
@@ -1934,12 +2288,11 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   onClick: () => void removeProfile(profile),
                 }, pendingDelete === profile.id ? text(tt, 'confirmDelete', '确认删除') : text(tt, 'delete', '删除')),
               ),
-              // 已连接主机就地展开文件浏览；连接成功由 30 秒心跳自动触发
               fileBlock,
             )
           }
 
-          return h('div', { className: 'dsh-ssh-root' },
+          return h('div', { className: 'dsh-ssh-root', ref: panelRoot },
             h('div', { className: 'dsh-ssh-head' },
               h('div', null,
                 h('h2', { className: 'dsh-ssh-title' }, text(tt, 'title', 'SSH 服务')),
@@ -1985,7 +2338,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           }],
         }), 'ssh-servers: tab type')
 
-        // 文件浏览已并入 HostsPanel：主机连接成功后在该卡片内就地展开，
+        // 文件浏览已并入 HostsPanel：在已连接主机的卡片内按需展开，
         // 不再注册独立的「SSH 服务文件」标签页，也不再有单独的 panel body。
         ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
           name: 'sidebar.right.pane.tab',

@@ -1,6 +1,6 @@
 {
   "name": "@laivikto/dsh-ssh-servers",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "SSH server manager for DeepSeek Harness: saved key/password connections, native key-file picker, live connection health, IPv4/IPv6 display, a task prompt copied to the clipboard, and remote file browsing.",
   "type": "module",
   "main": "index.js",
@@ -53,8 +53,8 @@
       "platform": "web",
       "immediately": true,
       "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-sidebar-right",
-        "@deepseek-ai/dsh-client-ui-sidebar-terminal",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-workspace"
       ]

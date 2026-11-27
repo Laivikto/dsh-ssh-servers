@@ -70,8 +70,8 @@ describe('连接失败识别', () => {
     const result = await waitForConnection(terminal, { password: 'x' }, terminal.mark())
 
     assert.equal(result.ok, false)
-    assert.equal(result.code, 'ssh-failed')
-    assert.match(result.message, /Connection refused/)
+    assert.equal(result.code, 'connection-refused')
+    assert.match(result.message, /端口/u)
   })
 
   test('区分本地提示符与远端登录成功', () => {
@@ -82,6 +82,30 @@ describe('连接失败识别', () => {
   test('提取登录失败信息', () => {
     assert.equal(loginFailure('Connection refused'), 'Connection refused')
     assert.equal(loginFailure('Permission denied (password).'), 'Permission denied (password).')
+  })
+
+  test('SSH 退出后仍根据终端输出识别指纹变化', async () => {
+    const terminal = fakeTerminal('WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.')
+    terminal.info.state = 'exited'
+    const result = await waitForConnection(terminal, {}, terminal.mark())
+    assert.equal(result.code, 'host-key-changed')
+    assert.match(result.message, /核对新指纹/u)
+  })
+
+  test('严格校验缺少记录时提示核对并添加密钥', async () => {
+    const terminal = fakeTerminal('No ED25519 host key is known for example.test and you have requested strict checking.\nHost key verification failed.')
+    terminal.info.state = 'exited'
+    const result = await waitForConnection(terminal, {}, terminal.mark())
+    assert.equal(result.code, 'host-key-unknown')
+    assert.match(result.message, /核对指纹/u)
+  })
+
+  test('命令发出后 SSH 断开会立即报告结果未知', async () => {
+    const terminal = fakeTerminal('', (_data, append) => {
+      append('\nConnection to test.example closed by remote host.\n')
+      terminal.info.state = 'exited'
+    })
+    await assert.rejects(runAndCapture({ terminal }, 'pwd', undefined, { pollMs: 5 }), /命令结果未知/u)
   })
 })
 

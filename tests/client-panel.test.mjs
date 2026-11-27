@@ -154,12 +154,14 @@ const PROFILE = {
  * 加载插件并取出 HostsPanel。
  * routes：接口名 → (body) => 返回值（对象 = 200 成功；{ status, json } = 指定状态码；Promise 可延迟）。
  */
-function loadPanel(routes) {
+function loadPanel(routes, { sessionId = 'sess-panel01', lastSession, onUpload, dom, profile = PROFILE } = {}) {
   const runtime = createRuntime()
   const intervals = []
   const calls = []
   let HostsPanel
-  const storage = new Map([['dsh.ssh-servers.v1', JSON.stringify([PROFILE])]])
+  let clientTest
+  const storage = new Map([['dsh.ssh-servers.v1', JSON.stringify([profile])]])
+  if (lastSession !== undefined) storage.set('dsh.ssh-servers.session-map.v1', JSON.stringify({ [PROFILE.id]: lastSession }))
   const sandbox = {
     console,
     setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms ?? 0, 5)),
@@ -180,6 +182,20 @@ function loadPanel(routes) {
     },
     URL,
     AbortSignal,
+    XMLHttpRequest: class {
+      headers = {}
+      upload = {}
+      open(method, url) { assert.equal(method, 'POST'); assert.match(url, /fs-upload$/u) }
+      setRequestHeader(name, value) { this.headers[name] = value }
+      send(file) {
+        const meta = JSON.parse(decodeURIComponent(this.headers['x-dsh-ssh-upload']))
+        this.upload.onprogress({ lengthComputable: true, loaded: file.size, total: file.size })
+        const result = onUpload(meta, file)
+        this.status = result.status
+        this.response = result.body
+        this.onload()
+      }
+    },
     async fetch(url, init) {
       const name = String(url).replace(/^.*ssh-servers\/api\//u, '')
       const body = JSON.parse(init.body)
@@ -196,11 +212,14 @@ function loadPanel(routes) {
         headers: { get: () => 'application/json' },
       }
     },
+    ...dom,
   }
   sandbox.window = {
+    ...dom?.window,
     __ModuleLoader__: {
       load({ factory }) {
         const mod = factory(() => runtime.React)
+        clientTest = mod.__test__
         const effects = []
         const ctx = {
           effect: (fn) => effects.push(fn()),
@@ -228,11 +247,13 @@ function loadPanel(routes) {
   }
   vm.createContext(sandbox)
   vm.runInContext(source, sandbox, { filename: 'client.js' })
-  const view = runtime.mount(HostsPanel, { sessionId: 'sess-panel01', useWorkspaces: undefined })
+  const view = runtime.mount(HostsPanel, { sessionId, useWorkspaces: undefined })
   return {
     view,
     runtime,
     calls,
+    clientTest,
+    storage,
     /** 手动触发一次 30 秒心跳（先等几毫秒，模拟心跳晚于连接发出）。 */
     async poll() {
       await new Promise((resolve) => setTimeout(resolve, 5))
@@ -268,6 +289,52 @@ async function connectFirst(panel) {
 // ---------------- 测试 ----------------
 
 describe('HostsPanel 连接状态（真实 client.js）', () => {
+  test('waits for idle and skips the resolver for IPv4 literals', async () => {
+    let idle
+    const panel = loadPanel(baseRoutes().routes, {
+      profile: { ...PROFILE, host: '192.0.2.7' },
+      dom: { window: { requestIdleCallback(fn) { idle = fn; return 1 }, cancelIdleCallback() {} } },
+    })
+    await panel.view.flush()
+    assert.equal(panel.calls.length, 0)
+    assert.ok(buttonByText(panel.view.tree, '连接'))
+    idle()
+    await panel.view.flush()
+    assert.deepEqual(panel.calls.map(call => call.name).sort(), ['connection-state', 'credentials/status'])
+    assert.match(textOf(panel.view.tree), /IPv4/u)
+  })
+
+  test('回到前台时立即查询连接状态', async () => {
+    const listeners = new Map()
+    const document = {
+      baseURI: 'http://127.0.0.1/',
+      hidden: true,
+      head: { appendChild() {} },
+      createElement: () => ({ setAttribute() {}, remove() {} }),
+      addEventListener: (name, callback) => listeners.set(name, callback),
+      removeEventListener: (name) => listeners.delete(name),
+    }
+    const panel = loadPanel(baseRoutes().routes, { dom: { document } })
+    await panel.view.flush()
+    assert.equal(panel.calls.some(call => call.name === 'connection-state'), false)
+    document.hidden = false
+    await listeners.get('visibilitychange')()
+    await panel.view.flush()
+    assert.equal(panel.calls.filter(call => call.name === 'connection-state').length, 1)
+  })
+
+  test('刷新后直接复用原聊天 ID 重连', async () => {
+    const { routes } = baseRoutes()
+    const lastSession = 'sess-original-4321'
+    const panel = loadPanel(routes, { sessionId: lastSession, lastSession })
+    await panel.view.flush()
+    buttonByText(panel.view.tree, '在原聊天中重连').props.onClick()
+    await panel.view.flush()
+    assert.equal(panel.calls.find(call => call.name === 'connect').body.sessionId, lastSession)
+    assert.match(textOf(panel.view.tree), /原聊天已重新连接/u)
+    assert.equal(buttonByText(panel.view.tree, '打开新聊天'), undefined)
+  })
+
   test('连接成功：显示「已连接」与「打开新聊天」', async () => {
     const { routes } = baseRoutes()
     const panel = loadPanel(routes)
@@ -387,23 +454,90 @@ describe('HostsPanel 连接状态（真实 client.js）', () => {
   })
 })
 
+test('右栏只在手动拖动后保存宽度，重新打开 SSH 面板时恢复', () => {
+  const listeners = new Map()
+  const frame = {
+    clientWidth: 1280,
+    hasAttribute: name => fullscreen && name === 'data-rightbar-fullscreen',
+    addEventListener: (type, callback) => listeners.set(type, callback),
+    removeEventListener: type => listeners.delete(type),
+  }
+  let fullscreen = false
+  let width = 570
+  const column = { parentElement: frame, getBoundingClientRect: () => ({ width }) }
+  const element = { closest: () => column, getBoundingClientRect: () => ({ width }) }
+  const native = { panels: { setRightbar: value => { width = value } } }
+  let onResize
+  const dom = {
+    ResizeObserver: class { constructor(callback) { onResize = callback } observe() {} disconnect() {} },
+    window: {
+      addEventListener: (type, callback) => listeners.set(type, callback),
+      removeEventListener: type => listeners.delete(type),
+    },
+    requestAnimationFrame: callback => { callback(); return 1 },
+    cancelAnimationFrame() {},
+  }
+  const { clientTest, storage } = loadPanel(baseRoutes().routes, { dom })
+  const key = 'dsh.ssh-servers.dock-width.v1'
+  const dispose = clientTest.rememberDockWidth(native, element)
+  listeners.get('pointerdown')({ button: 0, pointerId: 1, target: { closest: () => ({}) } })
+  width = 355
+  listeners.get('pointerup')({ type: 'pointerup', pointerId: 1 })
+  assert.equal(storage.get(key), '355')
+  fullscreen = true
+  listeners.get('pointerdown')({ button: 0, pointerId: 2, target: { closest: () => ({}) } })
+  width = 1280
+  listeners.get('pointerup')({ type: 'pointerup', pointerId: 2 })
+  assert.equal(storage.get(key), '355')
+  dispose()
+  assert.equal(listeners.size, 0)
+  fullscreen = false
+  width = 570
+  clientTest.rememberDockWidth(native, element)()
+  assert.equal(width, 355)
+  storage.set(key, '700')
+  frame.clientWidth = 800
+  const cleanup = clientTest.rememberDockWidth(native, element)
+  assert.equal(width, 560)
+  assert.equal(storage.get(key), '700')
+  frame.clientWidth = 1200
+  onResize()
+  assert.equal(width, 700)
+  cleanup()
+})
+
 describe('FileBrowserSection（真实 client.js）', () => {
-  async function mountBrowser(previewHandler) {
+  async function mountBrowser(previewHandler, options) {
     const { routes } = baseRoutes({
-      'fs-list': () => ({
+      'fs-list': options?.onList ?? (() => ({
         ok: true, path: '/', parent: null,
         entries: [{ name: 'a.txt', type: 'file', size: 3, mtimeMs: 0, mode: '644' }],
-      }),
+      })),
       'fs-preview': previewHandler,
+      'fs-upload/check': options?.onCheck ?? (() => ({ ok: true, exists: false })),
     })
-    const panel = loadPanel(routes)
+    const panel = loadPanel(routes, options)
     await connectFirst(panel)
+    assert.equal(findComponent(panel.view.tree, 'FileBrowserSection'), undefined)
+    buttons(panel.view.tree).find(button => button.props['aria-expanded'] === false && button.props.className === 'dsh-ssh-fs-toggle').props.onClick()
+    await panel.view.flush()
     const element = findComponent(panel.view.tree, 'FileBrowserSection')
-    assert.ok(element, '连接后应渲染文件浏览区块')
+    assert.ok(element, '手动展开后应渲染文件浏览区块')
+    if (options?.lastDirectory) panel.storage.set(`dsh.ssh-servers.last-directory.v1:${element.props.bindingKey}`, options.lastDirectory)
     const browser = panel.runtime.mount(element.type, element.props)
     await browser.flush()
     return browser
   }
+
+  test('恢复上次目录，目录失效时回到根目录', async () => {
+    const requested = []
+    await mountBrowser(undefined, { lastDirectory: '/old', onList: ({ path }) => {
+      requested.push(path)
+      if (path === '/old') return { status: 404, json: { ok: false, code: 'dir-unreadable' } }
+      return { ok: true, path, parent: null, entries: [] }
+    } })
+    assert.deepEqual(requested, ['/old', '/'])
+  })
 
   test('#8 回归：加载中关闭预览，响应到达后不会重新打开', async () => {
     let release
@@ -432,4 +566,60 @@ describe('FileBrowserSection（真实 client.js）', () => {
     const pre = [...walk(browser.tree)].find((n) => n.type === 'pre')
     assert.equal(textOf(pre), 'abc')
   })
+
+  test('同名文件在传输前检查，取消后没有上传，确认后只传一次', async () => {
+    const uploads = []
+    const browser = await mountBrowser(undefined, { onCheck: () => ({ ok: true, exists: true, size: 456 }), onUpload(meta) {
+      uploads.push(meta)
+      return { status: 200, body: { ok: true, path: '/sample.txt' } }
+    } })
+    const drop = [...walk(browser.tree)].find(node => typeof node.props.onDrop === 'function')
+    const dropFile = () => drop.props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: 'sample.txt', size: 5 }] } })
+    dropFile()
+    await browser.flush()
+    assert.equal(uploads.length, 0)
+    assert.match(textOf(browser.tree), /456 B/u)
+    buttonByText(browser.tree, '取消').props.onClick()
+    await browser.flush()
+    assert.equal(uploads.length, 0)
+    dropFile()
+    await browser.flush()
+    buttonByText(browser.tree, '确认覆盖').props.onClick()
+    await browser.flush()
+    assert.deepEqual(uploads.map(meta => meta.overwrite), [true])
+    assert.equal(uploads[0].directory, '/')
+    assert.match(textOf(browser.tree), /写入完成 \/sample\.txt/u)
+  })
+
+  test('上传结果未知时需检查目标目录再操作', async () => {
+    const browser = await mountBrowser(undefined, { onUpload: () => ({ status: 409, body: { ok: false, code: 'upload-result-unknown' } }) })
+    const drop = [...walk(browser.tree)].find(node => typeof node.props.onDrop === 'function')
+    drop.props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: 'sample.txt', size: 5 }] } })
+    await browser.flush()
+    buttonByText(browser.tree, '上传').props.onClick()
+    await browser.flush()
+    assert.match(textOf(browser.tree), /上传结果待确认/u)
+    assert.ok(buttonByText(browser.tree, '选择或拖入文件').props.disabled)
+    await buttonByText(browser.tree, '核对目标文件').props.onClick()
+    await browser.flush()
+    assert.match(textOf(browser.tree), /目标文件未找到/u)
+    assert.ok(!buttonByText(browser.tree, '选择或拖入文件').props.disabled)
+  })
+})
+
+test('连续采集巡检快照后显示指标变化', async () => {
+  let disk = 20
+  const { routes } = baseRoutes({ snapshot: () => ({ ok: true, snapshot: {
+    capturedAt: Date.now(), diskUsedPercent: disk += 10,
+    memoryTotalKiB: 1024, memoryAvailableKiB: 512, load: [0.2, 0.3, 0.4], services: [],
+  } }) })
+  const panel = loadPanel(routes)
+  await connectFirst(panel)
+  const element = findComponent(panel.view.tree, 'SnapshotPanel')
+  const section = panel.runtime.mount(element.type, element.props)
+  for (let i = 0; i < 2; i++) {
+    buttonByText(section.tree, '采集快照').props.onClick()
+    await section.flush()
+  }
+  assert.match(textOf(section.tree), /30% → 40%/u)
 })

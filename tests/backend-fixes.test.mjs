@@ -43,7 +43,7 @@ function fakeRes() {
   return res
 }
 
-function fakeCtx(records = new Map()) {
+function fakeCtx(records = new Map(), overrides = {}) {
   const credentials = {
     async readRecord(key) { return records.get(key) },
     async modifyRecord(key, fn) { records.set(key, await fn(records.get(key))) },
@@ -52,6 +52,7 @@ function fakeCtx(records = new Map()) {
   const services = {
     credentials,
     connection: { requestRejection: () => undefined },
+    ...overrides,
   }
   return { get: (name) => services[name], records }
 }
@@ -68,6 +69,71 @@ function fakeConnection({ hostId, host, control = 'agent', connectedAt = Date.no
 }
 
 afterEach(() => { T.connections.clear() })
+
+test('认证期间删除或改址会废弃尚未登记的 SSH 终端', async () => {
+  for (const action of ['delete', 'edit']) {
+    const hostId = `h-pending-${action}`
+    const binding = { host: 'old.example.invalid', port: 22, username: 'tester', authMode: 'password' }
+    const records = new Map([[T.recordKey(hostId), { kind: 'grant', payload: { ...binding, password: 'test-only' } }]])
+    let startAuth
+    let releaseAuth
+    const started = new Promise(resolve => { startAuth = resolve })
+    const auth = new Promise(resolve => { releaseAuth = resolve })
+    const terminal = {
+      id: 'test-terminal', info: { state: 'running', control: 'agent', shell: { name: IS_WIN ? 'powershell' : 'bash' } },
+      async write() { startAuth(); await auth },
+      async close() { terminal.info.state = 'exited' },
+      async drain() {},
+      mark: () => ({ lines: () => ({ lines: ['Authenticated to test.'] }), dispose() {} }),
+    }
+    const ctx = fakeCtx(records, {
+      sessionController: { resolveAgent: async () => ({ agent: { id: 'test-agent' } }) },
+      terminalController: { openForAgent: async () => terminal },
+    })
+    const output = fakeRes()
+    const connecting = T.connectHandler(ctx, fakeReq({ hostId, sessionId: 'session-test', ...binding }), output)
+    await started
+    const change = fakeRes()
+    if (action === 'delete') await T.deleteCredentialHandler(ctx, fakeReq({ hostId }), change)
+    else await T.saveCredentialHandler(ctx, fakeReq({ hostId, ...binding, host: 'new.example.invalid', password: 'test-new' }), change)
+    releaseAuth()
+    await connecting
+    assert.equal(change.status, 200)
+    assert.equal(output.body.code, 'connection-changed')
+    assert.equal(terminal.info.state, 'exited')
+    assert.equal(T.connections.size, 0)
+  }
+})
+
+test('SFTP 上传保留字面文件名，拒绝跨目录和超限请求', async () => {
+  assert.equal(T.uploadDestination('/var/www', '测试 [1].txt'), '/var/www/测试 [1].txt')
+  assert.equal(T.sftpPath('/var/www/测试 [1].txt'), '"/var/www/测试 [1].txt"')
+  for (const [dir, name] of [['/var/../tmp', 'a'], ['/tmp', '../a'], ['/tmp', 'a\r\nb']]) {
+    assert.equal(T.uploadDestination(dir, name), undefined)
+  }
+  const response = fakeRes()
+  const metadata = encodeURIComponent(JSON.stringify({ hostId: 'h-test', directory: '/', name: 'a' }))
+  await T.fsUploadHandler(fakeCtx(), fakeReq({}, {
+    'content-type': 'application/octet-stream', 'content-length': '33554433', 'x-dsh-ssh-upload': metadata,
+  }), response)
+  assert.equal(response.status, 413)
+})
+
+test('快照只保留可解析指标和已请求的服务', () => {
+  const snapshot = T.parseSnapshot('disk 24\nmemory 1024 512\nload 0.15 0.25 0.30\nservice nginx.service active\nservice other.service failed\n', ['nginx.service', 'missing.service'])
+  assert.equal(snapshot.diskUsedPercent, 24)
+  assert.equal(snapshot.memoryAvailableKiB, 512)
+  assert.deepEqual(snapshot.load, [0.15, 0.25, 0.30])
+  assert.deepEqual(snapshot.services, [{ name: 'nginx.service', state: 'active' }, { name: 'missing.service', state: 'unknown' }])
+  assert.equal(T.parseSnapshot('disk 24', []), undefined)
+})
+
+test('解析上传预检的当前文件大小以及目标不可用状态', () => {
+  assert.deepEqual(T.parseUploadCheck('banner\n__DSH_UPLOAD_NEW__\n'), { exists: false })
+  assert.deepEqual(T.parseUploadCheck('__DSH_UPLOAD_FILE__ 321\r\n'), { exists: true, size: 321 })
+  assert.deepEqual(T.parseUploadCheck('__DSH_UPLOAD_TARGET_UNSUPPORTED__\n'), { code: 'upload-target-unsupported' })
+  assert.equal(T.parseUploadCheck('unrelated'), undefined)
+})
 
 // ---------------- #1 ----------------
 
@@ -252,14 +318,16 @@ describe('远端 POSIX 命令（本机 sh 实测）', { skip: IS_WIN ? '需要 P
     assert.ok(Math.abs(entry.mtimeMs - fs.statSync(file).mtimeMs) < 120_000, '传统日期精确到分钟')
   })
 
-  test('目录探测：find 不支持 -printf 时走 ls 回退；目录不存在时报 __ERR__', () => {
-    const gnu = T.extractMarkedLines(runRemote(T.fsProbeCommand(nested)), '__DSH_FS_BEGIN__', '__DSH_FS_END__')
-    assert.deepEqual(gnu, ['__GNU__'])
-    const busybox = shim({ find: 'for a in "$@"; do [ "$a" = -printf ] && exit 1; done; exit 0' })
-    const plain = T.extractMarkedLines(runRemote(T.fsProbeCommand(nested), busybox), '__DSH_FS_BEGIN__', '__DSH_FS_END__')
-    assert.deepEqual(plain, [])
-    const missing = T.extractMarkedLines(runRemote(T.fsProbeCommand(path.join(dir, 'nope'))), '__DSH_FS_BEGIN__', '__DSH_FS_END__')
-    assert.deepEqual(missing, ['__ERR__'])
+  test('一次远端调用完成目录探测与列表，兼容 GNU find 和 ls 回退', () => {
+    const mode = raw => T.extractMarkedLines(raw, '__DSH_FS_MODE_BEGIN__', '__DSH_FS_MODE_END__')
+    const gnu = runRemote(T.fsListCommand(nested))
+    assert.deepEqual(mode(gnu), ['__GNU__'])
+    assert.deepEqual(T.parseFindOutput(gnu).map(entry => entry.name).sort(), ['no-newline', '文件 a.txt'])
+    const busybox = shim({ find: 'exit 1' })
+    const plain = runRemote(T.fsListCommand(nested), busybox)
+    assert.deepEqual(mode(plain), ['__LS__'])
+    assert.deepEqual(T.parseLsOutput(plain).map(entry => entry.name).sort(), ['no-newline', '文件 a.txt'])
+    assert.deepEqual(mode(runRemote(T.fsListCommand(path.join(dir, 'nope')))), ['__ERR__'])
   })
 
   test('预览命令：BSD/macOS 的 stat 不支持 -c、wc -c 带前导空格时仍能得到大小与内容', () => {

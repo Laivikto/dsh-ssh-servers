@@ -1,6 +1,6 @@
 # SSH Cloud Servers
 
-Manage SSH servers from the DSH Desktop right sidebar: custom names, saved key or password credentials, and IPv4 / IPv6 / dual-stack display. After connecting, the card updates in place and an SSH terminal is established, and a task prompt is copied to your clipboard so you can paste it wherever you like. Once connected, the host's file browser expands right inside the same card.
+Manage SSH servers from the DSH Desktop right sidebar: custom names, saved key or password credentials, and IPv4 / IPv6 / dual-stack display. After connecting, the card updates in place and an SSH terminal is established, and a task prompt is copied to your clipboard so you can paste it wherever you like. Once connected, open Remote files inside the host card when you need it.
 
 English | [简体中文](./README.zh.md)
 
@@ -10,10 +10,15 @@ English | [简体中文](./README.zh.md)
 
 - **Native private-key picker** — no more pasting paths by hand. Click **Browse…**, choose a folder, pick the file from the list, and the absolute path is filled in automatically.
 - **Live connection health** — checked every 30 seconds; `✓ Connected` / `✗ Unresponsive` shown directly on the server card.
+- **Reconnect in the original chat** — return to the previous chat and select **Reconnect in this chat** to restore its SSH tools.
+- **Remember dock width** — resize the right sidebar while SSH is visible. The width is restored the next time you open the SSH panel, subject to the host window size.
+- **Connection diagnostics** — get specific guidance for authentication, DNS, port, network, and host-key errors.
 - **In-place state changes** — after connecting you stay on the panel; the button turns into **Open new chat** so you decide when to move.
 - **Prompt auto-copied** — the task prompt lands in your system clipboard on connect, ready to paste into any chat or editor, without occupying the input box.
-- **Remote file browser (now inside the host card)** — no second tab to switch to. When a host connects, its card expands a file browser in place and loads the root directory; it collapses automatically when the connection drops. It uses a separate `ssh` exec channel, so browsing never types into your terminal.
+- **Remote file browser (now inside the host card)** — no second tab to switch to. Open the file browser inside a connected host card. It remembers the last directory for each host and collapses when the connection drops. It uses a separate `ssh` exec channel, so browsing never types into your terminal.
 - **One 30-second heartbeat** — host health and the file browser share a single probe; it is skipped while the window is in the background and catches up on return.
+- **SFTP upload** — check the destination before sending a file, then upload, rename, or confirm replacement. Files can be up to 32 MB. Check the destination file and compare its size after an interrupted upload.
+- **Health snapshots** — capture root filesystem usage, memory, load, and optional systemd services for a connected Linux host. Compare or copy the last two captures.
 - **IPv4 / IPv6 / dual-stack display** — addresses resolved and shown once saved, masked by default behind an eye toggle.
 - **Host-key policies** — trust-on-first-use (TOFU) or strict verification against `known_hosts`.
 - **Bilingual UI and errors** — the panel follows the interface language, and backend error messages (auth failures, unreadable directories, oversized files, …) are returned in the same language.
@@ -96,7 +101,7 @@ Disable or remove the plugin under **Settings → Plugins**.
 
 - Not a standalone vulnerability scanner: no built-in CVE database, no automatic detection or remediation.
 - Does not run checks in the background. Connecting only starts an SSH login; no remote inspection commands are executed.
-- Does not generate SSH keys, do port forwarding, SFTP, or bastion/jump-host chaining.
+- Does not generate SSH keys, do port forwarding, or do bastion/jump-host chaining.
 
 ## Requirements and limitations
 
@@ -104,6 +109,7 @@ Disable or remove the plugin under **Settings → Plugins**.
 - The native folder picker is available only in DSH Desktop (Windows / macOS); in a plain browser, **Browse…** tells you to enter the path manually.
 - One chat tracks one SSH connection opened by this plugin; when the same host reconnects successfully, the older connection is replaced (SSH tools in the old chat stop working).
 - File browsing uses a separate background ssh channel and supports **key-authenticated** Linux / Unix hosts only; passphrase-protected keys must be added to ssh-agent first (on Windows, enable the "OpenSSH Authentication Agent" service). For password hosts, view files in the terminal.
+- Upload uses the same key authentication, and needs an OpenSSH `sftp` client, a remote SFTP subsystem, and write permissions. No-overwrite uploads require hard-link support on the destination filesystem. Snapshots use Linux `/proc` and systemd for service states.
 - Typing in the terminal hands it to you and the plugin can no longer write to it; click **Connect** in the panel again to let the AI continue.
 - The ssh options used for the terminal connection require an OpenSSH client 7.6 or later (the 8.1 bundled with Windows 10 qualifies).
 - Interactive second factors (keyboard-interactive / 2FA) must be completed manually in the right-side terminal.

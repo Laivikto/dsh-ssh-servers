@@ -8,18 +8,19 @@
  * - 密码/口令只写入 PTY，不进入 Session 日志、聊天文本或工具结果。
  */
 import { existsSync, statSync } from 'node:fs'
-import { spawn } from 'node:child_process'
-import { readdir as readdirAsync, stat as statAsync } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { execFile, spawn } from 'node:child_process'
+import { mkdtemp, open, readdir as readdirAsync, rm, rmdir, stat as statAsync } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, isAbsolute, join } from 'node:path'
 import { Resolver } from 'node:dns/promises'
 import { isIP } from 'node:net'
 
 const API_ROOT = '/ssh-servers/api'
 const RECORD_SCOPE = 'ssh-servers'
 const MAX_BODY_BYTES = 64 * 1024
+const MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 const CONNECT_TIMEOUT_MS = 32_000
 
 const HOST_PATTERN = /^[A-Za-z0-9._:[][A-Za-z0-9._:[\]-]{0,252}$/u
@@ -30,9 +31,11 @@ const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/u
 /** 已连接终端：按 Session 保存，命令工具只处理当前聊天的连接。 */
 const connections = new Map()
 /** 正在认证或认证失败后保留给用户手动处理的终端；插件卸载时一并清理。 */
-const pendingTerminals = new Set()
+const pendingTerminals = new Map()
+const pendingConnects = new Map()
 /** 同一 Session 的并发连接互斥。 */
 const connectLocks = new Set()
+const uploads = new Set()
 
 /** Host 插件不应在激活时读任何私钥内容；这里只做路径检查。 */
 function normalizeKeyPath(value) {
@@ -520,6 +523,18 @@ function loginFailure(text) {
   return match?.[1]?.trim()
 }
 
+function connectionDiagnosis(text, translate = msg) {
+  if (/remote host identification has changed/iu.test(text)) return { code: 'host-key-changed', message: translate('主机指纹已变化。先通过云控制台核对新指纹，再更新本机 known_hosts。', 'The host fingerprint changed. Verify it through the cloud console before updating known_hosts.') }
+  if (/no [^\n]+ host key is known[^\n]*strict checking/iu.test(text)) return { code: 'host-key-unknown', message: translate('本机尚未信任这台主机的密钥。请通过云控制台核对指纹，再将已验证的密钥加入 known_hosts。', 'This host has no trusted key on this computer. Verify its fingerprint in the cloud console before adding the verified key to known_hosts.') }
+  if (/no matching host key type/iu.test(text)) return { code: 'host-key-algorithm', message: translate('本机和服务器没有共同支持的主机密钥算法。请检查服务器的 OpenSSH 和主机密钥配置。', 'The client and server do not share a host key algorithm. Check the server’s OpenSSH and host key configuration.') }
+  if (/host key verification failed/iu.test(text)) return { code: 'host-key-failed', message: translate('主机指纹校验失败。请核对服务器指纹和本机 known_hosts。', 'Host key verification failed. Check the server fingerprint and local known_hosts.') }
+  if (/permission denied|authentication failed/iu.test(text)) return { code: 'auth-failed', message: translate('认证失败。请检查用户名、密码或服务器上的公钥配置。', 'Authentication failed. Check the username, password, or public key configured on the server.') }
+  if (/could not resolve hostname/iu.test(text)) return { code: 'dns-failed', message: translate('无法解析主机名。请检查地址拼写和 DNS。', 'Could not resolve the host. Check the hostname and DNS.') }
+  if (/connection refused/iu.test(text)) return { code: 'connection-refused', message: translate('SSH 端口拒绝连接。请核对端口和服务器上的 SSH 服务状态。', 'The SSH port refused the connection. Check the port and the server’s SSH service.') }
+  if (/timed out|no route to host|network is unreachable/iu.test(text)) return { code: 'network-unreachable', message: translate('连接超时或网络不可达。请检查网络、云安全组和 SSH 端口。', 'The connection timed out or the network is unreachable. Check the network, cloud firewall, and SSH port.') }
+  return undefined
+}
+
 function sleep(ms) {
   return new Promise(resolve => { setTimeout(resolve, ms) })
 }
@@ -530,21 +545,23 @@ async function waitForConnection(terminal, options, loginMark) {
   let passphraseSent = false
   const startedAt = Date.now()
   while (Date.now() < deadline) {
-    if (terminal.info?.state === 'exited' || terminal.info?.state === 'failed') {
-      return { ok: false, code: 'ssh-exited', message: msg('SSH 进程已退出，未建立连接。', 'The SSH process exited before a connection was established.') }
-    }
+    if (options.cancelled?.()) return changedConnection()
     await terminal.drain().catch(() => {})
     const transcript = markText(loginMark)
+    const exited = terminal.info?.state === 'exited' || terminal.info?.state === 'failed'
     // 先认「已认证」：登录后的 MOTD/Banner 里若恰好有 "Password:" 或 "Permission denied"
     // 字样，旧顺序会误报失败，甚至把密码写进已登录的远端 shell（随后被回显进 AI 上下文）。
-    if (/(?:^|\n)Authenticated to [^\n]*/u.test(transcript)) {
+    if (!exited && /(?:^|\n)Authenticated to [^\n]*/u.test(transcript)) {
       await sleep(150)
       return { ok: true, terminalId: terminal.id }
     }
+    const diagnosis = connectionDiagnosis(transcript)
+    if (diagnosis !== undefined) return { ok: false, ...diagnosis }
     const failure = loginFailure(transcript)
     if (failure !== undefined) {
       return { ok: false, code: 'ssh-failed', message: failure }
     }
+    if (exited) return { ok: false, code: 'ssh-exited', message: msg('SSH 进程已退出；请在终端查看详细错误。', 'SSH exited. See the terminal for details.') }
     // 只检查最后一个非空行：/m 全文匹配会把登录 Banner 里恰好以 "Password:" 结尾的
     // 行误认成提示符，导致密码被提前写进 PTY 并在登录后回显给 AI。
     const lastLine = lastNonEmptyLine(transcript)
@@ -567,12 +584,6 @@ async function waitForConnection(terminal, options, loginMark) {
       passphraseSent = true
       await sleep(250)
       continue
-    }
-    if (passwordSent && /Permission denied/iu.test(transcript)) {
-      return { ok: false, code: 'auth-failed', message: msg("密码认证失败。请检查保存的密码，或手动在终端中登录。", "Password authentication failed. Check the saved password, or log in manually in the terminal.") }
-    }
-    if (passphraseSent && /Permission denied/iu.test(transcript)) {
-      return { ok: false, code: 'auth-failed', message: msg("密钥或口令认证失败。请检查私钥路径和口令。", "Key or passphrase authentication failed. Check the key path and passphrase.") }
     }
     // 登录成功只认 "Authenticated to ..."（VERBOSE 级别输出），已在循环开头判定。
     await sleep(250)
@@ -623,6 +634,34 @@ async function openSessionTerminal(ctx, agent, options) {
   }, AbortSignal.timeout(CONNECT_TIMEOUT_MS + 8_000))
 }
 
+function changedConnection() {
+  return { ok: false, code: 'connection-changed', message: msg('连接期间主机配置已修改或删除。请核对当前配置后重连。', 'The host configuration changed during sign-in. Review the current profile and reconnect.') }
+}
+
+function sameConnectionSettings(a, b) {
+  return a !== undefined && b !== undefined && sameBinding(bindingOf(a), bindingOf(b))
+    && normalizeHostKeyPolicy(a.hostKeyPolicy) === normalizeHostKeyPolicy(b.hostKeyPolicy)
+    && (a.authMode === 'key'
+      ? a.keyPath === b.keyPath && a.passphrase === b.passphrase
+      : a.password === b.password)
+}
+
+function closeAgentTerminal(terminal) {
+  try {
+    if (terminal !== undefined && terminal.info?.control !== 'user'
+      && terminal.info?.state !== 'exited' && terminal.info?.state !== 'failed') {
+      void Promise.resolve(terminal.close()).catch(() => {})
+    }
+  } catch { /* 终端已关闭。 */ }
+}
+
+function cancelPendingConnect(hostId) {
+  const attempt = pendingConnects.get(hostId)
+  if (attempt === undefined) return
+  attempt.cancelled = true
+  closeAgentTerminal(attempt.terminal)
+}
+
 async function connectHandler(ctx, req, res) {
   const parsed = await readPostBody(ctx, req, res)
   if (!parsed.ok) return
@@ -631,10 +670,13 @@ async function connectHandler(ctx, req, res) {
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id', message: msg("服务器配置 ID 无效。", "Invalid server profile ID.") })
   if (!SESSION_PATTERN.test(sessionId)) return writeJson(res, 400, { ok: false, code: 'invalid-session', message: msg("会话 ID 无效。", "Invalid session ID.") })
-  if (connectLocks.has(sessionId)) {
+  if (connectLocks.has(sessionId) || pendingConnects.has(hostId)) {
     return writeJson(res, 409, { ok: false, code: 'connect-busy', message: msg("该聊天已有连接正在进行，请等待完成。", "A connection is already in progress for this chat; wait for it to finish.") })
   }
   connectLocks.add(sessionId)
+  const attempt = { cancelled: false, terminal: undefined }
+  pendingConnects.set(hostId, attempt)
+  let keepTerminal = false
   try {
     const record = await readRecord(ctx, hostId)
     if (record === undefined) {
@@ -668,15 +710,22 @@ async function connectHandler(ctx, req, res) {
     }
     const agent = await resolveSessionAgent(ctx, sessionId)
     const previous = connections.get(String(agent.id))
-    if (previous !== undefined) {
-      dropConnection(agent.id, previous)
-      try { await previous.terminal.close() } catch { /* 用户可能已接管旧终端。 */ }
+    if (previous !== undefined && previous.hostId !== hostId) {
+      return writeJson(res, 409, { ok: false, code: 'session-host-mismatch', message: msg('这个聊天已连接另一台主机。请为该主机打开独立聊天。', 'This chat is connected to another host. Open a separate chat for this host.') })
     }
+    if (attempt.cancelled) return writeJson(res, 409, changedConnection())
     const terminal = await openSessionTerminal(ctx, agent, {
       name: record.name ?? body.name,
       ...(requested.authMode === 'key' ? { env: { DSH_SSH_KEY_PATH: normalizeKeyPath(record.keyPath) } } : {}),
     })
-    pendingTerminals.add(terminal)
+    attempt.terminal = terminal
+    if (attempt.cancelled) return writeJson(res, 409, changedConnection())
+    for (const [oldTerminal, oldSession] of pendingTerminals) {
+      if (oldSession !== sessionId) continue
+      pendingTerminals.delete(oldTerminal)
+      closeAgentTerminal(oldTerminal)
+    }
+    pendingTerminals.set(terminal, sessionId)
     const shellName = terminal.info?.shell?.name ?? ''
     const command = buildSshCommand({
       shellName,
@@ -687,6 +736,7 @@ async function connectHandler(ctx, req, res) {
       hostKeyPolicy: normalizeHostKeyPolicy(record.hostKeyPolicy),
     })
     await sleep(350)
+    if (attempt.cancelled) return writeJson(res, 409, changedConnection())
     const loginMark = terminal.mark()
     let outcome
     try {
@@ -694,17 +744,22 @@ async function connectHandler(ctx, req, res) {
       outcome = await waitForConnection(terminal, {
         password: requested.authMode === 'password' ? record.password : undefined,
         passphrase: requested.authMode === 'key' && typeof record.passphrase === 'string' ? record.passphrase : undefined,
+        cancelled: () => attempt.cancelled,
       }, loginMark)
     } finally {
       try { loginMark.dispose() } catch { /* 终端可能已关闭。 */ }
     }
+    const latest = await readRecord(ctx, hostId)
+    if (attempt.cancelled || !sameConnectionSettings(record, latest)) return writeJson(res, 409, changedConnection())
     if (!outcome.ok) {
       // 失败时给本地 shell 一点时间执行末尾的 exit，便于客户端区分“可手动处理的终端”
       // 与已经关闭的终端。
       await sleep(200)
+      if (attempt.cancelled) return writeJson(res, 409, changedConnection())
       // 已退出的终端不必再留在待清理集合里。
       const state = terminal.info?.state
       if (state === 'exited' || state === 'failed') pendingTerminals.delete(terminal)
+      keepTerminal = true
       return writeJson(res, 409, {
         ok: false,
         code: outcome.code,
@@ -718,12 +773,17 @@ async function connectHandler(ctx, req, res) {
       terminal,
       agent,
       hostId,
-      name: safeName(record.name ?? body.name),
+      name: safeName(latest.name ?? body.name),
       host: requested.host,
       port: requested.port,
       username: requested.username,
       authMode: requested.authMode,
       connectedAt: Date.now(),
+      sessionId,
+    }
+    if (previous !== undefined && connections.get(String(agent.id)) === previous) {
+      dropConnection(agent.id, previous)
+      closeAgentTerminal(previous.terminal)
     }
     // SSH 正常退出时本地 shell 会被上面的条件命令关闭；异常断线时仍可能回到本地
     // Shell。这里监视明确的断线文本并撤销连接，避免聊天工具把本地 Shell 当成远端。
@@ -747,6 +807,7 @@ async function connectHandler(ctx, req, res) {
     connection.guardDispose = installToolGuard(agent)
     pendingTerminals.delete(terminal)
     connections.set(String(agent.id), connection)
+    keepTerminal = true
     // 同一主机只保留最新的一条连接（界面提示「已有终端会被替换」）：
     // 每次连接都新建聊天，旧聊天里的连接若不撤销，旧聊天仍可对该主机执行命令，
     // 连接状态也会在新旧两条之间随机取一条。只在新连接成功后才替换，失败时旧连接不受影响。
@@ -769,6 +830,11 @@ async function connectHandler(ctx, req, res) {
       message: error instanceof Error ? error.message : String(error),
     })
   } finally {
+    if (!keepTerminal && attempt.terminal !== undefined) {
+      pendingTerminals.delete(attempt.terminal)
+      closeAgentTerminal(attempt.terminal)
+    }
+    pendingConnects.delete(hostId)
     connectLocks.delete(sessionId)
   }
 }
@@ -820,7 +886,7 @@ async function closeTerminalHandler(ctx, req, res) {
     }
     try {
       await terminalController.close(agent, terminalId)
-      for (const pending of pendingTerminals) {
+      for (const pending of pendingTerminals.keys()) {
         if (pending.id === terminalId) pendingTerminals.delete(pending)
       }
       return writeJson(res, 200, { ok: true })
@@ -841,6 +907,7 @@ async function saveCredentialHandler(ctx, req, res) {
   try {
     if (body.clear === true) {
       await deleteRecord(ctx, hostId)
+      cancelPendingConnect(hostId)
       const invalidated = invalidateHostConnections(hostId)
       return writeJson(res, 200, { ok: true, configured: false, bindingMatches: false, invalidated })
     }
@@ -875,6 +942,7 @@ async function saveCredentialHandler(ctx, req, res) {
       ...(nextPassphrase === undefined ? (sameTarget && typeof current?.passphrase === 'string' ? { passphrase: current.passphrase } : {}) : { passphrase: nextPassphrase }),
     }
     await writeRecord(ctx, hostId, payload)
+    if (!sameConnectionSettings(current, payload)) cancelPendingConnect(hostId)
     // 连接目标变了：旧连接仍指向旧服务器，必须作废，否则界面显示新地址、
     // 聊天里的命令却继续发往旧服务器。只改名称/私钥口令等不影响目标的字段时保留连接。
     // 「目标」以实际存活连接为准，而不是只比较凭据记录（记录可能已被改过多次）。
@@ -915,6 +983,7 @@ async function deleteCredentialHandler(ctx, req, res) {
   if (!ID_PATTERN.test(hostId)) return writeJson(res, 400, { ok: false, code: 'invalid-host-id' })
   try {
     await deleteRecord(ctx, hostId)
+    cancelPendingConnect(hostId)
     // 主机已删除：其连接不应继续可用。
     const invalidated = invalidateHostConnections(hostId)
     return writeJson(res, 200, { ok: true, invalidated })
@@ -1023,6 +1092,9 @@ function looksNonPosixRemote(stderr) {
 }
 
 function execRemote(target, command, options = {}) {
+  if (process.platform === 'win32' && !isAbsolute(SSH_BIN)) {
+    return Promise.reject(new Error(msg('未找到系统 OpenSSH 客户端。请先启用 Windows 的 OpenSSH 客户端。', 'System OpenSSH was not found. Enable the Windows OpenSSH Client first.')))
+  }
   const timeoutMs = options.timeoutMs ?? 20_000
   const maxBytes = options.maxBytes ?? 4 * 1024 * 1024
   // 子进程回调里不保证还在请求的异步上下文中，这里先把语言取出来。
@@ -1120,11 +1192,9 @@ function execRemote(target, command, options = {}) {
         )))
         return
       }
-      if (/host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/iu.test(stderr)) {
-        finish(reject, new Error(say(
-          '主机密钥校验失败（严格模式下 known_hosts 中没有该主机，或主机密钥已变化）。请确认服务器身份后再更新 known_hosts。',
-          'Host key verification failed (no known_hosts entry in strict mode, or the host key changed). Verify the server identity before updating known_hosts.',
-        )))
+      const hostKeyError = connectionDiagnosis(stderr, say)
+      if (hostKeyError?.code.startsWith('host-key-')) {
+        finish(reject, new Error(hostKeyError.message))
         return
       }
       if (looksNonPosixRemote(stderr)) {
@@ -1246,19 +1316,10 @@ async function resolveFsTarget(ctx, res, hostId) {
     })
     return { ok: false }
   }
-  return { ok: true, target }
+  return { ok: true, target, record }
 }
 
 // ---------- 远端 POSIX 命令（抽成纯函数，便于在本机 sh 里直接验证） ----------
-
-/** 探测目录：不存在/不可读 → __ERR__；GNU find 支持 -printf → __GNU__；否则两者都不输出。 */
-function fsProbeCommand(dir) {
-  const quoted = posixQuote(dir)
-  return `echo ${FS_BEGIN}; ` +
-    `if [ ! -d ${quoted} ] || [ ! -r ${quoted} ] || [ ! -x ${quoted} ]; then echo __ERR__; ` +
-    `elif find ${quoted} -maxdepth 1 -mindepth 1 -printf '' >/dev/null 2>&1; then echo __GNU__; ` +
-    `fi; echo ${FS_END}`
-}
 
 /** GNU find：一次拿到 类型/大小/时间/权限/名字。 */
 function fsGnuListCommand(dir) {
@@ -1271,6 +1332,17 @@ function fsGnuListCommand(dir) {
  */
 function fsLsListCommand(dir) {
   return `echo ${FS_BEGIN}; LC_ALL=C ls -la ${posixQuote(dir)} 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+}
+
+function fsListCommand(dir) {
+  const quoted = posixQuote(dir)
+  const mode = (value) => 'echo __DSH_FS_MODE_BEGIN__; echo ' + value + '; echo __DSH_FS_MODE_END__'
+  return [
+    'if [ ! -d ' + quoted + ' ] || [ ! -r ' + quoted + ' ] || [ ! -x ' + quoted + ' ]; then ' + mode('__ERR__'),
+    'elif find ' + quoted + ' -maxdepth 0 -printf "" >/dev/null 2>&1; then ' + mode('__GNU__') + '; ' + fsGnuListCommand(dir),
+    'else ' + mode('__LS__') + '; ' + fsLsListCommand(dir),
+    'fi',
+  ].join('\n')
 }
 
 /**
@@ -1327,33 +1399,12 @@ async function fsListHandler(ctx, req, res) {
   const target = resolved.target
 
   try {
-    // 走独立 exec 通道：不写终端、不产生回显
-    // 一次远端调用完成三件事，避免三次 SSH 握手：
-    //   1. 探测目录是否存在且可读（不存在/无权限 → __ERR__，回退分支也跳过，直接报错）
-    //   2. 探测 find 是否支持 -printf（GNU find → __GNU__；BusyBox/BSD/macOS → 空）
-    //   3. 按 find 或 ls 列出目录
-    // 这样修复了旧实现「-printf 失败被 2>/dev/null 吞掉、head 退出码 0、
-    // 标记照常输出 → 解析成空数组而不是 null → ls 回退永不触发」的问题。
-    const probeRaw = await execRemote(target, fsProbeCommand(dir), { timeoutMs: 15_000 })
-    const probeLines = extractMarkedLines(probeRaw, FS_BEGIN, FS_END)
-    if (probeLines === null) {
-      return writeJson(res, 500, { ok: false, code: 'list-failed', message: msg("无法探测远端目录状态。", "Could not probe the remote directory state.") })
-    }
-    if (probeLines.includes('__ERR__')) {
+    const raw = await execRemote(target, fsListCommand(dir), { timeoutMs: 20_000 })
+    const mode = extractMarkedLines(raw, '__DSH_FS_MODE_BEGIN__', '__DSH_FS_MODE_END__')?.[0]
+    if (mode === '__ERR__') {
       return writeJson(res, 404, { ok: false, code: 'dir-unreadable', message: msg("目录不存在或没有读取权限。", "The directory does not exist or is not readable.") })
     }
-    const isGnu = probeLines.includes('__GNU__')
-
-    let entries = null
-    if (isGnu) {
-      // GNU find：一次拿到类型/大小/时间/权限/名字
-      const raw = await execRemote(target, fsGnuListCommand(dir), { timeoutMs: 20_000 })
-      entries = parseFindOutput(raw)
-    } else {
-      // 非 GNU（BusyBox/BSD/macOS）：ls -la 输出传统日期，由 parseLsOutput 解析
-      const raw = await execRemote(target, fsLsListCommand(dir), { timeoutMs: 20_000 })
-      entries = parseLsOutput(raw)
-    }
+    const entries = mode === '__GNU__' ? parseFindOutput(raw) : mode === '__LS__' ? parseLsOutput(raw) : null
 
     if (entries === null) {
       return writeJson(res, 500, { ok: false, code: 'list-failed', message: msg("无法解析目录列表。", "Could not parse the directory listing.") })
@@ -1740,6 +1791,264 @@ async function fsDownloadRawHandler(ctx, req, res) {
   }
 }
 
+function sftpBatch(target, directory, batch) {
+  const binary = join(dirname(SSH_BIN), process.platform === 'win32' ? 'sftp.exe' : 'sftp')
+  if (!isAbsolute(SSH_BIN) || !existsSync(binary)) {
+    throw new Error(msg('找不到系统 OpenSSH SFTP 客户端。', 'System OpenSSH SFTP client is unavailable.'))
+  }
+  const host = isIP(target.host) === 6 ? `[${target.host}]` : target.host
+  const args = ['-q', '-b', '-', '-S', SSH_BIN, '-F', process.platform === 'win32' ? 'NUL' : '/dev/null',
+    '-P', String(target.port), '-i', target.keyPath, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+    '-o', 'PreferredAuthentications=publickey', '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none',
+    '-o', 'PermitLocalCommand=no', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15',
+    '-o', `StrictHostKeyChecking=${target.hostKeyPolicy === 'strict' ? 'yes' : 'accept-new'}`, `${target.username}@${host}`]
+  return new Promise((resolve, reject) => {
+    const child = execFile(binary, args, { cwd: directory, windowsHide: true, timeout: 120_000, maxBuffer: 64 * 1024 }, (error) => {
+      if (error === null) resolve()
+      else reject(new Error(msg('SFTP 操作失败。请检查密钥、SFTP 服务和目录权限。若连接中断，请刷新目录确认结果。', 'SFTP failed. Check the key, SFTP service, and directory permissions. If the connection dropped, refresh to verify the result.')))
+    })
+    child.stdin.on('error', () => {})
+    child.stdin.end(`${batch}\n`)
+  })
+}
+
+function sftpPath(path) {
+  // OpenSSH 在引号内已转义 glob 字符，只需处理引号本身。
+  return `"${path.replace(/"/gu, '\\"')}"`
+}
+
+function uploadDestination(directory, name) {
+  const dir = normalizeRemotePath(directory)
+  if (dir === undefined || /[\\\u0000-\u001f\u007f]/u.test(dir) || dir.split('/').some(part => part === '.' || part === '..')) return undefined
+  if (typeof name !== 'string' || name === '' || name === '.' || name === '..'
+    || /[\\/\u0000-\u001f\u007f]/u.test(name) || Buffer.byteLength(name) > 255) return undefined
+  const destination = `${dir === '/' ? '' : dir}/${name}`
+  return Buffer.byteLength(destination) <= 1800 ? destination : undefined
+}
+
+function latestHostConnection(hostId) {
+  let latest
+  for (const connection of connections.values()) {
+    if (connection.hostId === hostId) latest = latestConnection(latest, connection)
+  }
+  return latest
+}
+
+function requireLiveHost(res, hostId) {
+  const connection = latestHostConnection(hostId)
+  if (connection !== undefined && describeConnection(connection).alive) return connection
+  writeJson(res, 409, { ok: false, code: 'not-connected', message: msg('请先连接该主机。', 'Connect to this host first.') })
+  return undefined
+}
+
+function rawUploadMetadata(req) {
+  const raw = req.headers['x-dsh-ssh-upload']
+  if (typeof raw !== 'string' || raw.length > 12_000) return null
+  try {
+    const meta = JSON.parse(decodeURIComponent(raw))
+    return isJsonObject(meta) ? meta : null
+  } catch { return null }
+}
+
+async function saveUploadBody(req, filePath, size) {
+  const file = await open(filePath, 'wx', 0o600)
+  let received = 0
+  try {
+    for await (const chunk of req) {
+      received += chunk.length
+      if (received > size) throw new Error('upload-length')
+      await file.writeFile(chunk)
+    }
+    if (received !== size) throw new Error('upload-length')
+  } finally { await file.close() }
+}
+
+function uploadCheckCommand(destination, verify = false) {
+  const file = posixQuote(destination)
+  const parent = posixQuote(destination.slice(0, destination.lastIndexOf('/') + 1))
+  return `if [ ! -d ${parent} ] || [ ! -x ${parent} ]${verify ? '' : ` || [ ! -w ${parent} ]`}; then printf '%s\\n' __DSH_UPLOAD_DIR_UNAVAILABLE__
+elif [ -L ${file} ] || { [ -e ${file} ] && [ ! -f ${file} ]; }; then printf '%s\\n' __DSH_UPLOAD_TARGET_UNSUPPORTED__
+elif [ -f ${file} ]; then
+  size=$(stat -c %s ${file} 2>/dev/null || stat -f %z ${file} 2>/dev/null) || size=
+  printf '__DSH_UPLOAD_FILE__ %s\\n' "$size"
+else printf '%s\\n' __DSH_UPLOAD_NEW__
+fi`
+}
+
+function parseUploadCheck(output) {
+  for (const line of output.split(/\r?\n/u)) {
+    if (line === '__DSH_UPLOAD_NEW__') return { exists: false }
+    if (line === '__DSH_UPLOAD_DIR_UNAVAILABLE__') return { code: 'upload-dir-unavailable' }
+    if (line === '__DSH_UPLOAD_TARGET_UNSUPPORTED__') return { code: 'upload-target-unsupported' }
+    const match = /^__DSH_UPLOAD_FILE__ (\d*)$/u.exec(line)
+    if (match !== null) return match[1] === '' ? { exists: true } : { exists: true, size: Number(match[1]) }
+  }
+  return undefined
+}
+
+async function fsUploadCheckHandler(ctx, req, res) {
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const { hostId, directory, name } = parsed.body
+  const destination = uploadDestination(directory, name)
+  if (typeof hostId !== 'string' || !ID_PATTERN.test(hostId) || destination === undefined) {
+    return writeJson(res, 400, { ok: false, code: 'invalid-upload-path', message: msg('上传目标无效。请确认目录和文件名。', 'Invalid destination. Check the directory and file name.') })
+  }
+  const connection = requireLiveHost(res, hostId)
+  if (connection === undefined) return
+  const resolved = await resolveFsTarget(ctx, res, hostId)
+  if (!resolved.ok) return
+  if (latestHostConnection(hostId) !== connection || !sameBinding(bindingOf(connection), bindingOf(resolved.record))) {
+    return writeJson(res, 409, changedConnection())
+  }
+  try {
+    const result = parseUploadCheck(await execRemote(resolved.target, uploadCheckCommand(destination, parsed.body.verify === true), { timeoutMs: 12_000, maxBytes: 8192 }))
+    if (latestHostConnection(hostId) !== connection) return writeJson(res, 409, changedConnection())
+    if (result?.code === 'upload-dir-unavailable') return writeJson(res, 409, { ok: false, code: result.code, message: parsed.body.verify === true ? msg('无法访问目标目录。', 'The destination directory is inaccessible.') : msg('目标目录不存在或不可写。', 'The destination directory is missing or not writable.') })
+    if (result?.code === 'upload-target-unsupported') return writeJson(res, 409, { ok: false, code: result.code, message: msg('同名目录或链接已存在，请更换文件名。', 'A directory or link has that name. Choose a different file name.') })
+    if (result !== undefined) return writeJson(res, 200, { ok: true, path: destination, ...result })
+    throw new Error(msg('服务器没有返回目标检查结果。', 'The server did not return a destination check.'))
+  } catch (error) {
+    return writeJson(res, 409, { ok: false, code: 'upload-check-failed', message: error.message })
+  }
+}
+
+async function fsUploadHandler(ctx, req, res) {
+  if (req.method !== 'POST') return writeJson(res, 405, { ok: false, code: 'method-not-allowed' })
+  if (!guard(ctx, req, res)) return
+  if (req.headers['content-type'] !== 'application/octet-stream') return writeJson(res, 415, { ok: false, code: 'binary-required' })
+  const meta = rawUploadMetadata(req)
+  setLang(langOf(meta, req))
+  const hostId = meta?.hostId
+  const destination = uploadDestination(meta?.directory, meta?.name)
+  if (typeof hostId !== 'string' || !ID_PATTERN.test(hostId) || destination === undefined) {
+    return writeJson(res, 400, { ok: false, code: 'invalid-upload-path', message: msg('上传目标无效。请确认目录和文件名。', 'Invalid destination. Check the directory and file name.') })
+  }
+  const length = req.headers['content-length']
+  const size = typeof length === 'string' && /^\d+$/u.test(length) ? Number(length) : -1
+  if (size < 0 || size > MAX_UPLOAD_BYTES) {
+    return writeJson(res, size < 0 ? 411 : 413, { ok: false, code: 'upload-size', message: msg('上传需要已知文件大小，每个文件最多 32 MB。', 'Uploads need a known file size and are limited to 32 MB per file.') })
+  }
+  const connection = requireLiveHost(res, hostId)
+  if (connection === undefined) return
+  if (uploads.has(hostId) || uploads.size >= 3) return writeJson(res, 409, { ok: false, code: 'upload-busy', message: msg('已有上传在进行，请稍后重试。', 'An upload is in progress. Try again when it finishes.') })
+  uploads.add(hostId)
+  let directory
+  let temporaryRemote
+  let target
+  let finalWriteStarted = false
+  try {
+    const resolved = await resolveFsTarget(ctx, res, hostId)
+    if (!resolved.ok) return
+    target = resolved.target
+    const assertStillConnected = async () => {
+      const current = await readRecord(ctx, hostId)
+      if (res.destroyed || latestHostConnection(hostId) !== connection || !describeConnection(connection).alive
+        || !sameBinding(bindingOf(connection), bindingOf(resolved.record)) || !sameConnectionSettings(resolved.record, current)) {
+        throw new Error(changedConnection().message)
+      }
+    }
+    directory = await mkdtemp(join(tmpdir(), 'dsh-ssh-upload-'))
+    await saveUploadBody(req, join(directory, 'payload'), size)
+    await assertStillConnected()
+    const parent = destination.slice(0, destination.lastIndexOf('/') + 1)
+    const staging = `${parent}.dsh-upload-${randomUUID()}`
+    const dest = posixQuote(destination)
+    const check = meta.overwrite === true ? ':' : `if [ -e ${dest} ] || [ -L ${dest} ]; then printf '%s\\n' __DSH_UPLOAD_EXISTS__; exit 0; fi`
+    const setup = await execRemote(target, `if [ -L ${dest} ] || { [ -e ${dest} ] && [ ! -f ${dest} ]; }; then printf '%s\\n' __DSH_UPLOAD_DIRECTORY__; exit 0; fi; ${check}; umask 077; mkdir ${posixQuote(staging)}`)
+    if (setup.split(/\r?\n/u).includes('__DSH_UPLOAD_DIRECTORY__')) {
+      return writeJson(res, 409, { ok: false, code: 'upload-target-unsupported', message: msg('同名目录或链接已存在，请更换文件名。', 'A directory or link has that name. Choose a different file name.') })
+    }
+    if (setup.split(/\r?\n/u).includes('__DSH_UPLOAD_EXISTS__')) return uploadConflict(res)
+    temporaryRemote = staging
+    const payload = `${staging}/payload`
+    await sftpBatch(target, directory, `put payload ${sftpPath(payload)}`)
+    await assertStillConnected()
+    finalWriteStarted = true
+    if (meta.overwrite === true) {
+      await sftpBatch(target, directory, `rename ${sftpPath(payload)} ${sftpPath(destination)}`)
+    } else {
+      const out = await execRemote(target, `if link ${posixQuote(payload)} ${dest} 2>/dev/null; then printf '%s\\n' __DSH_UPLOAD_OK__; elif [ -e ${dest} ] || [ -L ${dest} ]; then printf '%s\\n' __DSH_UPLOAD_EXISTS__; else exit 1; fi`)
+      if (out.split(/\r?\n/u).includes('__DSH_UPLOAD_EXISTS__')) {
+        return uploadConflict(res)
+      }
+      if (!out.split(/\r?\n/u).includes('__DSH_UPLOAD_OK__')) throw new Error(msg('服务器没有确认保存文件。请刷新目录查看。', 'The server did not confirm the write. Refresh the directory to check.'))
+    }
+    return writeJson(res, 200, { ok: true, path: destination, size })
+  } catch (error) {
+    if (!res.destroyed) return writeJson(res, 409, { ok: false, code: finalWriteStarted ? 'upload-result-unknown' : 'upload-failed', message: error.message })
+  } finally {
+    if (temporaryRemote !== undefined) {
+      await execRemote(target, `rm -f ${posixQuote(`${temporaryRemote}/payload`)}; rmdir ${posixQuote(temporaryRemote)}`, { timeoutMs: 8_000 }).catch(() => {})
+    }
+    if (directory !== undefined) {
+      await rm(join(directory, 'payload'), { force: true }).catch(() => {})
+      await rmdir(directory).catch(() => {})
+    }
+    uploads.delete(hostId)
+  }
+}
+
+function uploadConflict(res) {
+  return writeJson(res, 409, { ok: false, code: 'upload-conflict', message: msg('目标已有同名文件。请确认是否覆盖。', 'A file with this name already exists. Confirm before replacing it.') })
+}
+
+function snapshotCommand(services) {
+  const commands = [
+    'LC_ALL=C; export LC_ALL',
+    'test -r /proc/meminfo && test -r /proc/loadavg || exit 1',
+    'df -Pk / | awk \'NR == 2 { sub(/%$/, "", $5); print "disk", $5 }\'',
+    'awk \'/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2} END {if(t>0 && a<=t && a!="") print "memory", t, a}\' /proc/meminfo',
+    'awk \'{print "load", $1, $2, $3}\' /proc/loadavg',
+  ]
+  for (const service of services) {
+    const unit = posixQuote(service)
+    commands.push(`value=$(systemctl show --property=LoadState --property=ActiveState -- ${unit} 2>/dev/null | awk -F= '$1=="LoadState" {loaded=$2} $1=="ActiveState" {active=$2} END {if(loaded=="loaded") print active}'); printf 'service %s %s\\n' ${unit} "$value"`)
+  }
+  return commands.join('\n')
+}
+
+function parseSnapshot(output, services) {
+  const lines = output.split(/\r?\n/u)
+  const disk = lines.find(line => /^disk \d+$/u.test(line))?.split(' ')
+  const memory = lines.find(line => /^memory \d+ \d+$/u.test(line))?.split(' ')
+  const load = lines.find(line => /^load(?: \d+(?:\.\d+)?){3}$/u.test(line))?.split(' ')
+  if (disk === undefined || memory === undefined || load === undefined) return undefined
+  return {
+    capturedAt: Date.now(), diskUsedPercent: Number(disk[1]), memoryTotalKiB: Number(memory[1]), memoryAvailableKiB: Number(memory[2]),
+    load: load.slice(1).map(Number),
+    services: services.map(name => {
+      const value = lines.find(line => line.startsWith(`service ${name} `))?.slice(name.length + 9)
+      return { name, state: /^(active|inactive|failed|activating|deactivating|reloading|maintenance|refreshing)$/u.test(value ?? '') ? value : 'unknown' }
+    }),
+  }
+}
+
+async function snapshotHandler(ctx, req, res) {
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const { hostId, services = [] } = parsed.body
+  if (typeof hostId !== 'string' || !ID_PATTERN.test(hostId) || !Array.isArray(services) || services.length > 8
+    || services.some(unit => typeof unit !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.@-]{0,94}(?:\.service)?$/u.test(unit))) {
+    return writeJson(res, 400, { ok: false, code: 'invalid-services', message: msg('请输入最多 8 个有效的 systemd 服务名。', 'Enter up to eight valid systemd service names.') })
+  }
+  const connection = requireLiveHost(res, hostId)
+  if (connection === undefined) return
+  const resolved = await resolveFsTarget(ctx, res, hostId)
+  if (!resolved.ok) return
+  if (latestHostConnection(hostId) !== connection || !sameBinding(bindingOf(connection), bindingOf(resolved.record))) {
+    return writeJson(res, 409, changedConnection())
+  }
+  const units = [...new Set(services)]
+  try {
+    const output = await execRemote(resolved.target, snapshotCommand(units), { timeoutMs: 15_000, maxBytes: 16 * 1024 })
+    if (latestHostConnection(hostId) !== connection) return writeJson(res, 409, changedConnection())
+    const snapshot = parseSnapshot(output, units)
+    if (snapshot !== undefined) return writeJson(res, 200, { ok: true, snapshot })
+  } catch { /* 下方返回可操作的统一提示。 */ }
+  return writeJson(res, 409, { ok: false, code: 'snapshot-failed', message: msg('无法采集巡检快照。请确认远端为 Linux，且当前密钥可用于后台连接。', 'Could not capture a snapshot. Check that the host runs Linux and the key works for background connections.') })
+}
+
 function latestConnection(current, candidate) {
   return current === undefined || (candidate.connectedAt ?? 0) > (current.connectedAt ?? 0)
     ? candidate : current
@@ -1773,6 +2082,7 @@ function describeConnection(target) {
     reason: 'alive',
     terminalState,
     connectedAt: target.connectedAt,
+    ...(typeof target.sessionId === 'string' ? { sessionId: target.sessionId } : {}),
     ...(typeof control === 'string' ? { control } : {}),
   }
 }
@@ -2000,6 +2310,7 @@ async function runAndCapture(connection, command, signal, options = {}) {
     // 同时拿到真实退出码；随机数防止输出里恰好包含哨兵字样导致误判。
     const sentinel = `__DSH_DONE_${createHash('sha256').update(command).digest('hex').slice(0, 8)}_${Date.now().toString(36)}__`
     const suffix = sentinelSuffix(sentinel)
+    if (signal?.aborted) throw new Error(msg('命令已取消。', 'The command was cancelled.'))
     await terminal.write(`${buildRunLine(command, sentinel)}\r`)
     // 输出可能分多次到达：每轮都从标记处读取完整累计文本，哨兵行完整出现才算结束。
     const donePattern = new RegExp(`(?:^|\\n)[ \\t]*${sentinel} (\\d+)[ \\t\\r]*(?:\\n|$)`, 'u')
@@ -2022,6 +2333,9 @@ async function runAndCapture(connection, command, signal, options = {}) {
           .split(suffix).join('')
         const after = current.slice(done.index + done[0].length)
         return { text: truncateText(before + after), exitCode: Number(done[1]) }
+      }
+      if (terminal.info?.state !== 'running' || looksDisconnected(current)) {
+        throw new Error(msg('SSH 连接已断开，命令结果未知。重连后请先检查远端状态，再决定是否重试。', 'SSH disconnected. The command result is unknown. Check the remote state after reconnecting before retrying.'))
       }
     }
     // 超时：告知调用方命令仍可能在远端运行，而不是静默返回一段可能不完整的输出。
@@ -2194,6 +2508,9 @@ export function apply(ctx) {
     { path: `${API_ROOT}/fs-list`, handler: (req, res) => fsListHandler(ctx, req, res) },
     { path: `${API_ROOT}/fs-download`, handler: (req, res) => fsDownloadHandler(ctx, req, res) },
     { path: `${API_ROOT}/fs-download-raw`, handler: (req, res) => fsDownloadRawHandler(ctx, req, res) },
+    { path: `${API_ROOT}/fs-upload`, handler: (req, res) => fsUploadHandler(ctx, req, res) },
+    { path: `${API_ROOT}/fs-upload/check`, handler: (req, res) => fsUploadCheckHandler(ctx, req, res) },
+    { path: `${API_ROOT}/snapshot`, handler: (req, res) => snapshotHandler(ctx, req, res) },
     { path: `${API_ROOT}/fs-preview`, handler: (req, res) => fsPreviewHandler(ctx, req, res) },
   ]
   for (const route of routes) {
@@ -2220,12 +2537,14 @@ export function apply(ctx) {
       } catch { /* 终端可能已关闭。 */ }
     }
     connections.clear()
-    for (const terminal of pendingTerminals) {
+    for (const terminal of pendingTerminals.keys()) {
       try {
         if (terminal.info?.control === 'agent') void terminal.close()
       } catch { /* 终端可能已关闭。 */ }
     }
     pendingTerminals.clear()
+    for (const hostId of pendingConnects.keys()) cancelPendingConnect(hostId)
+    pendingConnects.clear()
     connectLocks.clear()
   }, 'ssh-servers: connection cleanup')
 }
@@ -2276,7 +2595,7 @@ export const __test__ = {
   looksNonPosixRemote,
   connections,
   connectionStateOf,
-  fsProbeCommand,
+  fsListCommand,
   fsGnuListCommand,
   fsLsListCommand,
   fsPreviewCommand,
@@ -2285,4 +2604,14 @@ export const __test__ = {
   invalidateHostConnections,
   saveCredentialHandler,
   deleteCredentialHandler,
+  connectHandler,
+  connectionDiagnosis,
+  uploadDestination,
+  sftpPath,
+  fsUploadHandler,
+  uploadCheckCommand,
+  parseUploadCheck,
+  snapshotCommand,
+  parseSnapshot,
+  snapshotHandler,
 }
