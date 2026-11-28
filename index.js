@@ -524,10 +524,10 @@ function loginFailure(text) {
 }
 
 function connectionDiagnosis(text, translate = msg) {
-  if (/remote host identification has changed/iu.test(text)) return { code: 'host-key-changed', message: translate('主机指纹已变化。先通过云控制台核对新指纹，再更新本机 known_hosts。', 'The host fingerprint changed. Verify it through the cloud console before updating known_hosts.') }
-  if (/no [^\n]+ host key is known[^\n]*strict checking/iu.test(text)) return { code: 'host-key-unknown', message: translate('本机尚未信任这台主机的密钥。请通过云控制台核对指纹，再将已验证的密钥加入 known_hosts。', 'This host has no trusted key on this computer. Verify its fingerprint in the cloud console before adding the verified key to known_hosts.') }
+  if (/remote host identification has changed/iu.test(text)) return { code: 'host-key-changed', message: translate('主机指纹已变化。先通过云控制台核对新指纹，再更新本机的主机信任记录。', 'The host fingerprint changed. Verify it through the cloud console before updating known_hosts.') }
+  if (/no [^\n]+ host key is known[^\n]*strict checking/iu.test(text)) return { code: 'host-key-unknown', message: translate('本机尚未信任这台主机的密钥。请通过云控制台核对指纹，再将已验证的密钥加入本机的主机信任记录。', 'This host has no trusted key on this computer. Verify its fingerprint in the cloud console before adding the verified key to known_hosts.') }
   if (/no matching host key type/iu.test(text)) return { code: 'host-key-algorithm', message: translate('本机和服务器没有共同支持的主机密钥算法。请检查服务器的 OpenSSH 和主机密钥配置。', 'The client and server do not share a host key algorithm. Check the server’s OpenSSH and host key configuration.') }
-  if (/host key verification failed/iu.test(text)) return { code: 'host-key-failed', message: translate('主机指纹校验失败。请核对服务器指纹和本机 known_hosts。', 'Host key verification failed. Check the server fingerprint and local known_hosts.') }
+  if (/host key verification failed/iu.test(text)) return { code: 'host-key-failed', message: translate('主机指纹校验失败。请核对服务器指纹与本机的主机信任记录。', 'Host key verification failed. Check the server fingerprint and local known_hosts.') }
   if (/permission denied|authentication failed/iu.test(text)) return { code: 'auth-failed', message: translate('认证失败。请检查用户名、密码或服务器上的公钥配置。', 'Authentication failed. Check the username, password, or public key configured on the server.') }
   if (/could not resolve hostname/iu.test(text)) return { code: 'dns-failed', message: translate('无法解析主机名。请检查地址拼写和 DNS。', 'Could not resolve the host. Check the hostname and DNS.') }
   if (/connection refused/iu.test(text)) return { code: 'connection-refused', message: translate('SSH 端口拒绝连接。请核对端口和服务器上的 SSH 服务状态。', 'The SSH port refused the connection. Check the port and the server’s SSH service.') }
@@ -1817,7 +1817,7 @@ function sftpBatch(target, directory, batch) {
   return new Promise((resolve, reject) => {
     const child = execFile(binary, args, { cwd: directory, windowsHide: true, timeout: 120_000, maxBuffer: 64 * 1024 }, (error) => {
       if (error === null) resolve()
-      else reject(new Error(msg('SFTP 操作失败。请检查密钥、SFTP 服务和目录权限。若连接中断，请刷新目录确认结果。', 'SFTP failed. Check the key, SFTP service, and directory permissions. If the connection dropped, refresh to verify the result.')))
+      else reject(new Error(msg('SFTP 操作失败。请检查密钥、SFTP 服务和目录权限。若连接中断，请核对目标文件。', 'SFTP failed. Check the key, SFTP service, and directory permissions. If the connection dropped, check the destination file.')))
     })
     child.stdin.on('error', () => {})
     child.stdin.end(`${batch}\n`)

@@ -51,16 +51,16 @@ window.__ModuleLoader__.load({
       passwordAuth: '密码',
       keyAuth: 'SSH 私钥',
       password: '密码',
-      passwordHint: '已保存；留空则保持不变',
+      passwordHint: '已保存，留空可保留原值',
       passwordPlaceholder: '主机登录密码',
       keyPath: '私钥文件绝对路径',
       keyPathPlaceholder: 'C:\\Users\\你\\.ssh\\id_ed25519',
       passphrase: '私钥口令（没有口令可留空）',
-      passphraseHint: '已保存；留空则保持不变',
+      passphraseHint: '已保存，留空可保留原值',
       hostKey: '主机密钥校验',
       acceptNew: '首次自动信任',
-      strict: '严格校验（known_hosts）',
-      hostKeyNote: '首次自动信任可一键连接，但第一次连接前无法验证主机身份；严格校验要求本机 known_hosts 已存在正确记录。',
+      strict: '严格校验（仅信任已记录的主机）',
+      hostKeyNote: '首次自动信任会记录第一次连接时收到的主机密钥。严格校验要求主机密钥与本机的信任记录一致。',
       commandApprovalNote: "AI 发出的 SSH 命令需要逐条确认。",
       retryTerminalKept: "终端已保留，可在当前聊天的终端手动处理。",
       reconnected: "原聊天已重新连接，SSH 工具已恢复。",
@@ -75,7 +75,7 @@ window.__ModuleLoader__.load({
       uploadSizeMatches: "文件大小一致，内容待核对。",
       uploadSizeMismatch: "目标文件大小与所选文件不符。",
       uploadDone: "写入完成",
-      uploadInterrupted: "上传结果待确认。请检查目标目录。",
+      uploadInterrupted: "上传结果待确认。请核对目标文件。",
       uploadPick: "选择或拖入文件",
       uploadReplace: "确认覆盖",
       uploadStart: "上传",
@@ -145,11 +145,11 @@ window.__ModuleLoader__.load({
       openChatHint: '打开已建立的 SSH 会话对应的新聊天',
       draftFailed: '提示词预填失败：',
       openChat: '打开新聊天',
-      promptCopied: '连接已建立，推荐提示词已复制到剪贴板。可直接粘贴到任意聊天。',
-      promptCopiedShort: '推荐提示词已复制到剪贴板。',
-      promptCopyFailed: '连接已建立，但自动复制提示词失败。可点「推荐提示词」手动复制。',
+      promptCopied: '连接已建立，巡检提示词已复制到剪贴板。可直接粘贴到任意聊天。',
+      promptCopiedShort: '巡检提示词已复制到剪贴板。',
+      promptCopyFailed: '连接已建立，但自动复制提示词失败。可点「复制巡检提示词」再试一次。',
       copyPrompt: '复制巡检提示词',
-      copyPromptHint: '复制推荐的 SSH 检查提示词到剪贴板',
+      copyPromptHint: '将 SSH 巡检提示词复制到剪贴板',
       fsTitle: '远程文件',
       fsLoading: '加载中…',
       fsRefresh: '刷新',
@@ -189,7 +189,7 @@ window.__ModuleLoader__.load({
       kindBinary: '二进制',
       kindText: '文本',
       noSessionId: '新聊天没有返回会话 ID。',
-      terminalKept: '终端已保留；可点「打开新聊天」进入对应聊天手动处理。',
+      terminalKept: '终端已保留。点「打开新聊天」继续手动处理。',
       namePlaceholder: '生产主机',
       leaveEmpty: '可留空',
       authPending: '认证未完成',
@@ -234,16 +234,16 @@ window.__ModuleLoader__.load({
       passwordAuth: 'Password',
       keyAuth: 'SSH private key',
       password: 'Password',
-      passwordHint: 'Saved; leave blank to keep it',
+      passwordHint: 'Saved. Leave blank to keep the current value.',
       passwordPlaceholder: 'Server login password',
       keyPath: 'Absolute private-key path',
       keyPathPlaceholder: 'C:\\Users\\you\\.ssh\\id_ed25519',
       passphrase: 'Key passphrase (leave blank if none)',
-      passphraseHint: 'Saved; leave blank to keep it',
+      passphraseHint: 'Saved. Leave blank to keep the current value.',
       hostKey: 'Host key verification',
       acceptNew: 'Trust on first use',
-      strict: 'Strict (known_hosts)',
-      hostKeyNote: 'Trust on first use connects in one click but cannot verify the server before the first connection; strict mode requires an existing known_hosts record.',
+      strict: 'Strict verification (trusted hosts only)',
+      hostKeyNote: 'Trust on first use records the host key on the first connection. Strict verification requires a matching key in your local trust records.',
       commandApprovalNote: "Each SSH command from the assistant requires confirmation.",
       retryTerminalKept: "The terminal is still open. Continue manually in this chat’s terminal.",
       reconnected: "Reconnected in the original chat. SSH tools are available.",
@@ -258,7 +258,7 @@ window.__ModuleLoader__.load({
       uploadSizeMatches: "File sizes match. Contents are unverified.",
       uploadSizeMismatch: "Destination size differs from the selected file.",
       uploadDone: "Write complete",
-      uploadInterrupted: "Upload result needs confirmation. Check the destination folder.",
+      uploadInterrupted: "The upload result is uncertain. Check the destination file.",
       uploadPick: "Choose or drop a file",
       uploadReplace: "Confirm replacement",
       uploadStart: "Upload",
@@ -330,9 +330,9 @@ window.__ModuleLoader__.load({
       draftFailed: 'Failed to prefill the prompt: ',
       promptCopied: 'Connected. The suggested prompt has been copied to your clipboard — paste it into any chat.',
       promptCopiedShort: 'Suggested prompt copied to clipboard.',
-      promptCopyFailed: 'Connected, but copying the suggested prompt failed. Use "Suggested prompt" to copy it manually.',
+      promptCopyFailed: 'Connected, but copying the suggested prompt failed. Select "Copy inspection prompt" to try again.',
       copyPrompt: 'Copy inspection prompt',
-      copyPromptHint: 'Copy the suggested SSH review prompt to the clipboard',
+      copyPromptHint: 'Copy the SSH inspection prompt to the clipboard',
       fsTitle: 'Remote files',
       fsLoading: 'Loading…',
       fsRefresh: 'Refresh',
@@ -485,6 +485,11 @@ window.__ModuleLoader__.load({
       .dsh-ssh-field{display:flex;flex-direction:column;gap:4px;min-width:0}
       .dsh-ssh-field label,.dsh-ssh-legend{font-size:11.5px;color:var(--dsw-alias-label-secondary);font-weight:600}
       .dsh-ssh-field input,.dsh-ssh-field select{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l1);border-radius:7px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);padding:6px 8px;font:inherit;font-size:12px;min-height:30px}
+      .dsh-ssh-hostkey{margin:0;padding:0;border:0}
+      .dsh-ssh-hostkey legend{padding:0;margin-bottom:4px}
+      .dsh-ssh-hostkey label{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:7px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);cursor:pointer}
+      .dsh-ssh-hostkey label:has(input:checked){border-color:var(--dsw-alias-brand-primary)}
+      .dsh-ssh-hostkey input[type=radio]{width:auto;min-height:0;margin:0;accent-color:var(--dsw-alias-brand-primary)}
       .dsh-ssh-field input:focus,.dsh-ssh-field select:focus{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
       .dsh-ssh-grid2{display:grid;grid-template-columns:minmax(0,1fr) 76px;gap:8px}
       .dsh-ssh-seg{display:flex;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;overflow:hidden;background:var(--dsw-alias-bg-base)}
@@ -1275,7 +1280,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       return h('div', { className: 'dsh-fs-section' },
         h('div', { className: 'dsh-fs-section-head' },
           h('div', { style: { minWidth: 0 } },
-            h('h3', { className: 'dsh-fs-section-title' }, text(tt, 'fsTitle', 'SSH 服务文件')),
+            h('h3', { className: 'dsh-fs-section-title' }, text(tt, 'fsTitle', '远程文件')),
             h('p', { className: 'dsh-fs-section-sub' }, `${hostName} · ${hostUser}@${hostAddr}`),
           ),
           h('button', {
@@ -1329,7 +1334,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             ? `${text(tt, 'uploadSending', '正在传给插件')} ${uploadProgress}%`
             : text(tt, 'uploadRemote', '正在通过 SFTP 写入远端…')) : null,
           uncertainUpload !== null ? h('div', { className: 'dsh-ssh-banner', role: 'alert' },
-            h('span', null, `${text(tt, 'uploadInterrupted', '上传结果待确认。请检查目标目录。')} ${uncertainUpload.name}`),
+            h('span', null, `${text(tt, 'uploadInterrupted', '上传结果待确认。请核对目标文件。')} ${uncertainUpload.name}`),
             h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: verifyingUpload,
               onClick: () => verifyUpload(false) }, text(tt, 'uploadRefreshTarget', '核对目标文件')),
             uncertainUpload.digest ? h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: verifyingUpload,
@@ -1947,7 +1952,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   revealPanel()
                   const hint = createdSession === sessionId
                     ? text(tt, 'retryTerminalKept', '终端已保留，可在当前聊天的终端手动处理。')
-                    : text(tt, 'terminalKept', '终端已保留；可点「打开新聊天」进入对应聊天手动处理。')
+                    : text(tt, 'terminalKept', '终端已保留。点「打开新聊天」继续手动处理。')
                   setError(`${apiFailure.message}\n${hint}`)
                   return
                 }
@@ -1965,8 +1970,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               setNotice(reconnectSession !== undefined
                 ? `${text(tt, 'reconnected', '原聊天已重新连接，SSH 工具已恢复。')} · ${profile.name}`
                 : copied
-                ? text(tt, 'promptCopied', '连接已建立，推荐提示词已复制到剪贴板。可直接粘贴到任意聊天。')
-                : text(tt, 'promptCopyFailed', '连接已建立，但自动复制提示词失败。可点「推荐提示词」手动复制。'))
+                ? text(tt, 'promptCopied', '连接已建立，巡检提示词已复制到剪贴板。可直接粘贴到任意聊天。')
+                : text(tt, 'promptCopyFailed', '连接已建立，但自动复制提示词失败。可点「复制巡检提示词」再试一次。'))
             } catch (failure) {
               if (reconnectSession === undefined && createdSession !== undefined && !keepSession) {
                 try { await ctx.uiWorkspace.archiveSession(createdSession) } catch { /* 已打开或无法归档。 */ }
@@ -2167,7 +2172,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                     h('label', { htmlFor: 'dsh-ssh-passphrase' }, text(tt, 'passphrase', '私钥口令（没有口令可留空）')),
                     h('input', {
                       id: 'dsh-ssh-passphrase', type: 'password', value: form.passphrase, autoComplete: 'new-password',
-                      placeholder: form.hasPassphrase ? text(tt, 'passphraseHint', '已保存；留空则保持不变') : text(tt, 'leaveEmpty', '可留空'),
+                      placeholder: form.hasPassphrase ? text(tt, 'passphraseHint', '已保存，留空可保留原值') : text(tt, 'leaveEmpty', '可留空'),
                       onChange: event => setField('passphrase', event.target.value),
                     }),
                   ),
@@ -2176,20 +2181,24 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   h('label', { htmlFor: 'dsh-ssh-password' }, text(tt, 'password', '密码')),
                   h('input', {
                     id: 'dsh-ssh-password', type: 'password', value: form.password, autoComplete: 'new-password',
-                    placeholder: form.hasPassword ? text(tt, 'passwordHint', '已保存；留空则保持不变') : text(tt, 'passwordPlaceholder', '主机登录密码'),
+                    placeholder: form.hasPassword ? text(tt, 'passwordHint', '已保存，留空可保留原值') : text(tt, 'passwordPlaceholder', '主机登录密码'),
                     onChange: event => setField('password', event.target.value),
                   }),
                 ),
-              h('div', { className: 'dsh-ssh-field' },
-                h('label', { htmlFor: 'dsh-ssh-hostkey' }, text(tt, 'hostKey', '主机密钥校验')),
-                h('select', {
-                  id: 'dsh-ssh-hostkey', value: form.hostKeyPolicy,
-                  onChange: event => setField('hostKeyPolicy', event.target.value),
-                },
-                  h('option', { value: 'accept-new' }, text(tt, 'acceptNew', '首次自动信任')),
-                  h('option', { value: 'strict' }, text(tt, 'strict', '严格校验（known_hosts）')),
-                ),
-                h('div', { className: 'dsh-ssh-note' }, text(tt, 'hostKeyNote', '首次自动信任可一键连接，但第一次连接前无法验证主机身份。')),
+              h('fieldset', { className: 'dsh-ssh-field dsh-ssh-hostkey', 'aria-describedby': 'dsh-ssh-hostkey-note' },
+                h('legend', { className: 'dsh-ssh-legend' }, text(tt, 'hostKey', '主机密钥校验')),
+                [
+                  ['accept-new', text(tt, 'acceptNew', '首次自动信任')],
+                  ['strict', text(tt, 'strict', '严格校验（仅信任已记录的主机）')],
+                ].map(([value, label]) => h('label', { key: value },
+                  h('input', {
+                    type: 'radio', name: 'dsh-ssh-hostkey', value,
+                    checked: form.hostKeyPolicy === value,
+                    onChange: () => setField('hostKeyPolicy', value),
+                  }),
+                  label,
+                )),
+                h('div', { id: 'dsh-ssh-hostkey-note', className: 'dsh-ssh-note' }, text(tt, 'hostKeyNote', '首次自动信任会记录第一次连接时收到的主机密钥。严格校验要求主机密钥与本机的信任记录一致。')),
               ),
               h('div', { className: 'dsh-ssh-note' }, text(tt, 'commandApprovalNote', 'AI 发出的 SSH 命令需要逐条确认。')),
               h('div', { className: 'dsh-ssh-note' }, text(tt, 'securityNote', '密码和私钥口令只写入本机 DSH 凭据库，不会发送给模型，也不会写入聊天记录。插件不复制私钥文件。')),
@@ -2257,7 +2266,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   onClick: () => setFilesExpanded(profile.id, !expanded),
                 },
                   h('span', { className: 'dsh-ssh-fs-caret' }, expanded ? '▾' : '▸'),
-                  text(tt, 'fsTitle', 'SSH 服务文件'),
+                  text(tt, 'fsTitle', '远程文件'),
                   h('span', { className: 'dsh-ssh-fs-badge' }, text(tt, 'fsConnectedBadge', '已连接')),
                 ),
                 expanded
@@ -2359,19 +2368,19 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                  connectedSession !== undefined
                   ? h('button', {
                     type: 'button', className: 'dsh-ssh-btn', disabled: busy !== null,
-                    title: text(tt, 'copyPromptHint', '复制推荐的 SSH 检查提示词到剪贴板'),
+                    title: text(tt, 'copyPromptHint', '将 SSH 巡检提示词复制到剪贴板'),
                     onClick: () => {
                        const prompt = chat?.prompt ?? buildPrompt(profile, ctx.locale.getLocale()?.active ?? 'zh')
                       void (async () => {
                         const copied = await copyToClipboard(prompt)
                         if (copied) {
-                          setNotice(text(tt, 'promptCopiedShort', '推荐提示词已复制到剪贴板。'))
+                          setNotice(text(tt, 'promptCopiedShort', '巡检提示词已复制到剪贴板。'))
                         } else {
                           setError(text(tt, 'promptCopyFailed', '复制失败，请检查浏览器剪贴板权限。'))
                         }
                       })()
                     },
-                  }, text(tt, 'copyPrompt', '推荐提示词'))
+                  }, text(tt, 'copyPrompt', '复制巡检提示词'))
                   : null,
                 currentStatus?.failed === true
                   ? h('button', {
