@@ -72,6 +72,9 @@ describe('client.js 真实实现', () => {
     // 无效输入不产生 '0 B' 这类误导性文本
     assert.equal(fns.humanSize(null), '')
     assert.equal(fns.humanSize(-1), '')
+    assert.equal(fns.humanSize(NaN), '')
+    assert.equal(fns.humanSize(undefined), '')
+    assert.equal(fns.humanSize(-1), '')
     assert.equal(fns.humanSize('x'), '')
   })
 
@@ -79,6 +82,9 @@ describe('client.js 真实实现', () => {
     const sample = new Date(2026, 10, 17, 9, 5, 0).getTime()
     assert.equal(fns.formatTime(sample), '2026-11-17 09:05')
     assert.equal(fns.formatTime(0), '')
+    assert.equal(fns.formatTime(new Date(2026, 11, 3, 7, 8).getTime()), '2026-12-03 07:08')
+    assert.equal(fns.formatTime(undefined), '')
+    assert.equal(fns.formatTime(-5), '')
     assert.equal(fns.formatTime(null), '')
   })
 
@@ -87,6 +93,11 @@ describe('client.js 真实实现', () => {
     assert.equal(fns.fileKindLabel({ type: 'link', name: 'x' }), '链接')
     assert.equal(fns.fileKindLabel({ type: 'file', name: 'nginx.conf' }), 'conf')
     assert.equal(fns.fileKindLabel({ type: 'file', name: 'README' }), '文件')
+    assert.equal(fns.fileKindLabel({ type: 'file', name: 'photo.JPG' }), 'jpg')
+    assert.equal(fns.fileKindLabel({ type: 'file', name: 'a.tar.gz' }), 'gz')
+    assert.equal(fns.fileKindLabel({ type: 'file', name: '.bashrc' }), '文件')
+    assert.equal(fns.fileKindLabel({ type: 'file', name: 'trailing.' }), '文件')
+    assert.equal(fns.fileKindLabel({ type: 'file' }), '文件')
     // 英文环境走字典
     const enT = (k) => ({ kindDir: 'Folder', kindLink: 'Link', kindFile: 'File' }[k] ?? k)
     assert.equal(fns.fileKindLabel({ type: 'dir', name: 'var' }, enT), 'Folder')
