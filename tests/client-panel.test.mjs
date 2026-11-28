@@ -154,7 +154,7 @@ const PROFILE = {
  * 加载插件并取出 HostsPanel。
  * routes：接口名 → (body) => 返回值（对象 = 200 成功；{ status, json } = 指定状态码；Promise 可延迟）。
  */
-function loadPanel(routes, { sessionId = 'sess-panel01', lastSession, onUpload, dom, profile = PROFILE } = {}) {
+function loadPanel(routes, { sessionId = 'sess-panel01', lastSession, onUpload, dom, openSession = () => {}, profile = PROFILE } = {}) {
   const runtime = createRuntime()
   const intervals = []
   const calls = []
@@ -232,7 +232,7 @@ function loadPanel(routes, { sessionId = 'sess-panel01', lastSession, onUpload, 
           sidebarRight: { openTab() {} },
           sidebarRightTabs: { register: () => () => {} },
           sessions: { create: async () => ({ sessionId: 'sess-abcdef12' }) },
-          uiWorkspace: { openSession() {}, archiveSession: async () => {} },
+          uiWorkspace: { openSession, archiveSession: async () => {} },
           slots: {
             inject: (_name, fn) => fn(),
             register: (opts, Component) => {
@@ -321,6 +321,38 @@ describe('HostsPanel 连接状态（真实 client.js）', () => {
     await listeners.get('visibilitychange')()
     await panel.view.flush()
     assert.equal(panel.calls.filter(call => call.name === 'connection-state').length, 1)
+  })
+
+  test('取消操作发送当前尝试 ID，并恢复连接按钮', async () => {
+    let request
+    let finish
+    const { routes } = baseRoutes({
+      connect: body => { request = body; return new Promise(resolve => { finish = resolve }) },
+      'connect/cancel': body => {
+        assert.equal(body.attemptId, request.attemptId)
+        assert.equal(body.hostId, request.hostId)
+        finish({ status: 409, json: { ok: false } })
+        return { ok: true, cancelled: true }
+      },
+    })
+    const panel = loadPanel(routes)
+    await connectFirst(panel)
+    buttonByText(panel.view.tree, '取消连接').props.onClick()
+    await panel.view.flush()
+    assert.match(textOf(panel.view.tree), /已取消连接/u)
+    assert.ok(buttonByText(panel.view.tree, '连接'))
+  })
+
+  test('旧聊天打开失败时保留入口并给出重试提示', async () => {
+    const panel = loadPanel(baseRoutes().routes, {
+      lastSession: 'sess-previous01',
+      openSession: async () => { throw new Error('unavailable') },
+    })
+    await panel.view.flush()
+    buttonByText(panel.view.tree, '回到上次聊天').props.onClick()
+    await panel.view.flush()
+    assert.match(textOf(panel.view.tree), /无法打开聊天/u)
+    assert.ok(buttonByText(panel.view.tree, '回到上次聊天'))
   })
 
   test('刷新后直接复用原聊天 ID 重连', async () => {
@@ -529,6 +561,19 @@ describe('FileBrowserSection（真实 client.js）', () => {
     return browser
   }
 
+  test('部分目录条目可继续加载', async () => {
+    const limits = []
+    const browser = await mountBrowser(undefined, { onList: ({ path, limit }) => {
+      limits.push(limit)
+      return { ok: true, path, parent: null, entries: [], hasMore: limit === 500 }
+    } })
+    assert.match(textOf(browser.tree), /仅显示部分文件/u)
+    buttonByText(browser.tree, '加载更多').props.onClick()
+    await browser.flush()
+    assert.deepEqual(limits, [500, 1000])
+    assert.equal(buttonByText(browser.tree, '加载更多'), undefined)
+  })
+
   test('恢复上次目录，目录失效时回到根目录', async () => {
     const requested = []
     await mountBrowser(undefined, { lastDirectory: '/old', onList: ({ path }) => {
@@ -589,6 +634,24 @@ describe('FileBrowserSection（真实 client.js）', () => {
     assert.deepEqual(uploads.map(meta => meta.overwrite), [true])
     assert.equal(uploads[0].directory, '/')
     assert.match(textOf(browser.tree), /写入完成 \/sample\.txt/u)
+  })
+
+  test('中断后的内容校验能识别同样大小的不同文件', async () => {
+    const browser = await mountBrowser(undefined, {
+      dom: { crypto: { subtle: { digest: async () => new Uint8Array(32).fill(1).buffer } } },
+      onCheck: ({ hashSize }) => ({ ok: true, exists: hashSize !== undefined, size: 5, digest: '02'.repeat(32) }),
+      onUpload: () => ({ status: 409, body: { ok: false, code: 'upload-result-unknown' } }),
+    })
+    const drop = [...walk(browser.tree)].find(node => typeof node.props.onDrop === 'function')
+    drop.props.onDrop({ preventDefault() {}, dataTransfer: { files: [{
+      name: 'sample.txt', size: 5, arrayBuffer: async () => new Uint8Array(5).buffer,
+    }] } })
+    await browser.flush()
+    await buttonByText(browser.tree, '上传').props.onClick()
+    await browser.flush()
+    await buttonByText(browser.tree, '校验文件内容').props.onClick()
+    await browser.flush()
+    assert.match(textOf(browser.tree), /目标文件内容不同/u)
   })
 
   test('上传结果未知时需检查目标目录再操作', async () => {

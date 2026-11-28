@@ -17,6 +17,19 @@ window.__ModuleLoader__.load({
     const MAX_PROFILES = 30
 
     const zh = {
+      cancelConnect: "取消连接",
+      cancellingConnect: "正在取消…",
+      connectionCancelled: "已取消连接。",
+      chatOpenFailed: "无法打开聊天。请重试，或在会话列表检查该聊天是否还在。",
+      listPartial: "仅显示部分文件，筛选范围为已加载条目。",
+      listLimit: "已达到 5,000 项显示上限。",
+      loadMore: "加载更多",
+      noFileMatches: "已加载的文件中没有匹配项。",
+      uploadCheckContents: "校验文件内容",
+      uploadContentMatches: "文件内容一致。",
+      uploadContentMismatch: "目标文件内容不同。",
+      uploadContentUnavailable: "无法读取服务器的 SHA-256 校验值。",
+      uploadDismiss: "结束核对",
       title: 'SSH 服务',
       description: '管理常用 SSH 主机，连接后可在聊天里使用终端。',
       add: '添加主机',
@@ -187,6 +200,19 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
+      cancelConnect: "Cancel connection",
+      cancellingConnect: "Cancelling…",
+      connectionCancelled: "Connection cancelled.",
+      chatOpenFailed: "Could not open the chat. Retry or check whether it is still in the chat list.",
+      listPartial: "Showing a partial list. Filtering applies to loaded entries.",
+      listLimit: "Reached the 5,000-entry display limit.",
+      loadMore: "Load more",
+      noFileMatches: "No matches among loaded files.",
+      uploadCheckContents: "Verify file contents",
+      uploadContentMatches: "File contents match.",
+      uploadContentMismatch: "Destination file contents differ.",
+      uploadContentUnavailable: "Could not read the server SHA-256 checksum.",
+      uploadDismiss: "Finish checking",
       title: 'SSH',
       description: 'Manage your SSH hosts and open a terminal in chat.',
       add: 'Add server',
@@ -956,6 +982,8 @@ For destructive operations (deleting files, changing system config, reboot/shutd
       const tt = sectionT ?? ((k, d) => d ?? k)
       const [path, setPath] = React.useState('/')
       const [parent, setParent] = React.useState(null)
+      const [hasMore, setHasMore] = React.useState(false)
+      const [listLimit, setListLimit] = React.useState(500)
       const [entries, setEntries] = React.useState([])
       const [loading, setLoading] = React.useState(false)
       const [error, setError] = React.useState('')
@@ -1002,7 +1030,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         previewSeq.current++
       }, [hostId])
 
-      const load = React.useCallback(async (targetPath) => {
+      const load = React.useCallback(async (targetPath, limit = 500) => {
         // 换目录后旧预览已失效，同时作废在途的预览请求
         previewSeq.current++
         const mine = ++listSeq.current
@@ -1011,17 +1039,19 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         setError('')
         setNotice('')
         try {
-          const data = await api('fs-list', { hostId, path: targetPath })
+          const data = await api('fs-list', { hostId, path: targetPath, limit })
           if (!alive.current || mine !== listSeq.current) return
           setPath(data.path)
           try { localStorage.setItem(directoryKey, data.path) } catch { /* 本地存储不可用。 */ }
           setParent(data.parent ?? null)
+          setHasMore(data.hasMore === true)
+          setListLimit(limit)
           setEntries(Array.isArray(data.entries) ? data.entries : [])
           return true
         } catch (reason) {
           if (!alive.current || mine !== listSeq.current) return
           setError(reason instanceof ApiError ? reason.message : String(reason))
-          setEntries([])
+          if (limit === 500) { setEntries([]); setHasMore(false) }
           if (reason instanceof ApiError && reason.data?.code === 'dir-unreadable') return 'unreadable'
         } finally {
           if (alive.current && mine === listSeq.current) setLoading(false)
@@ -1063,8 +1093,15 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         setError('')
         setUploadProgress(0)
         const pending = { directory, name, size: file.size }
-        storeUploadResult(recoveryKey, pending)
         try {
+          if (typeof globalThis.crypto?.subtle?.digest === 'function' && typeof file.arrayBuffer === 'function') {
+            try {
+              const bytes = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', await file.arrayBuffer()))
+              pending.digest = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+            } catch { /* 大小核对仍可用。 */ }
+          }
+          if (!alive.current) return
+          storeUploadResult(recoveryKey, pending)
           const result = await uploadBinary({ hostId, directory, name, overwrite: remote.exists === true }, file, progress => {
             if (alive.current) setUploadProgress(progress)
           })
@@ -1184,6 +1221,37 @@ For destructive operations (deleting files, changing system config, reboot/shutd
         }
       }
 
+      const finishUploadCheck = () => {
+        storeUploadResult(recoveryKey, null)
+        setUncertainUpload(null)
+        setSelectedUpload(null)
+      }
+      const verifyUpload = async (compareContents) => {
+        if (verifyingUpload || uncertainUpload === null) return
+        setVerifyingUpload(true)
+        try {
+          const { directory, name, size, digest } = uncertainUpload
+          const result = await api('fs-upload/check', { hostId, directory, name, verify: true,
+            ...(compareContents ? { hashSize: size } : {}) })
+          if (!alive.current) return
+          let key = 'uploadMissing'
+          if (result.exists) {
+            if (!Number.isSafeInteger(result.size) || !Number.isSafeInteger(size)) key = 'uploadSizeUnknown'
+            else if (result.size !== size) key = 'uploadSizeMismatch'
+            else if (!compareContents) key = 'uploadSizeMatches'
+            else if (!result.digest) key = 'uploadContentUnavailable'
+            else key = result.digest === digest ? 'uploadContentMatches' : 'uploadContentMismatch'
+          }
+          setError('')
+          setNotice(text(tt, key, zh[key]) + ' ' + name)
+          if (!digest || !['uploadSizeMatches', 'uploadSizeUnknown', 'uploadContentUnavailable'].includes(key)) finishUploadCheck()
+        } catch (reason) {
+          if (alive.current) setError(formatError(reason))
+        } finally {
+          if (alive.current) setVerifyingUpload(false)
+        }
+      }
+
       const sorted = React.useMemo(() => {
         const kw = filter.trim().toLowerCase()
         let list = entries.filter((e) => kw === '' || String(e.name).toLowerCase().includes(kw))
@@ -1262,26 +1330,12 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             : text(tt, 'uploadRemote', '正在通过 SFTP 写入远端…')) : null,
           uncertainUpload !== null ? h('div', { className: 'dsh-ssh-banner', role: 'alert' },
             h('span', null, `${text(tt, 'uploadInterrupted', '上传结果待确认。请检查目标目录。')} ${uncertainUpload.name}`),
-            h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: loading || verifyingUpload, onClick: async () => {
-              if (verifyingUpload) return
-              setVerifyingUpload(true)
-              try {
-                const result = await api('fs-upload/check', { hostId, directory: uncertainUpload.directory, name: uncertainUpload.name, verify: true })
-                if (!alive.current) return
-                const key = !result.exists ? 'uploadMissing'
-                  : !Number.isSafeInteger(result.size) || !Number.isSafeInteger(uncertainUpload.size) ? 'uploadSizeUnknown'
-                    : result.size === uncertainUpload.size ? 'uploadSizeMatches' : 'uploadSizeMismatch'
-                setError('')
-                setNotice(`${text(tt, key, zh[key])} ${uncertainUpload.name}`)
-                storeUploadResult(recoveryKey, null)
-                setUncertainUpload(null)
-                setSelectedUpload(null)
-              } catch (reason) {
-                if (alive.current) setError(formatError(reason))
-              } finally {
-                if (alive.current) setVerifyingUpload(false)
-              }
-            } }, text(tt, 'uploadRefreshTarget', '核对目标文件')),
+            h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: verifyingUpload,
+              onClick: () => verifyUpload(false) }, text(tt, 'uploadRefreshTarget', '核对目标文件')),
+            uncertainUpload.digest ? h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: verifyingUpload,
+              onClick: () => verifyUpload(true) }, text(tt, 'uploadCheckContents', zh.uploadCheckContents)) : null,
+            uncertainUpload.digest ? h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: verifyingUpload,
+              onClick: finishUploadCheck }, text(tt, 'uploadDismiss', zh.uploadDismiss)) : null,
           ) : null,
         ) : null,
         h('div', { className: 'dsh-fs-toolbar' },
@@ -1315,7 +1369,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
           loading
             ? h('div', { className: 'dsh-fs-loading' }, text(tt, 'fsLoading', '加载中…'))
             : sorted.length === 0
-              ? h('div', { className: 'dsh-fs-loading' }, text(tt, 'fsEmptyDir', '目录为空'))
+              ? h('div', { className: 'dsh-fs-loading' }, filter.trim() ? text(tt, 'noFileMatches', zh.noFileMatches) : text(tt, 'fsEmptyDir', '目录为空'))
               : sorted.map((entry) => h('div', {
                 className: 'dsh-fs-row' + (entry.type === 'dir' ? ' is-dir' : ''),
                 key: entry.name,
@@ -1362,6 +1416,11 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 h('span', { className: 'dsh-fs-type' }, fileKindLabel(entry, tt)),
               )),
         ),
+        hasMore ? h('div', { className: 'dsh-ssh-note' },
+          text(tt, listLimit < 5000 ? 'listPartial' : 'listLimit', listLimit < 5000 ? zh.listPartial : zh.listLimit),
+          listLimit < 5000 ? h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: loading,
+            onClick: () => void load(path, listLimit + 500) }, text(tt, 'loadMore', zh.loadMore)) : null,
+        ) : null,
         h('div', { className: 'dsh-ssh-note' },
           // 条目数插进翻译后的文案：text() 命中字典后兜底不会生效，
           // 所以条目数必须在这里手动拼进结果。
@@ -1804,7 +1863,52 @@ For destructive operations (deleting files, changing system config, reboot/shutd
             }
           }
 
+          const connectionAttempt = useRef(null)
+          const [connecting, setConnecting] = useState(null)
+          const [cancelling, setCancelling] = useState(false)
+          const cancelConnect = async () => {
+            const attempt = connectionAttempt.current
+            if (!attempt || attempt.cancelled) return
+            attempt.cancelled = true
+            setCancelling(true)
+            if (!attempt.sent) return
+            try {
+              const request = { hostId: attempt.hostId, attemptId: attempt.id }
+              let result = await api('connect/cancel', request)
+              if (!result.cancelled && connectionAttempt.current === attempt) {
+                await new Promise(resolve => setTimeout(resolve, 150))
+                if (connectionAttempt.current === attempt) result = await api('connect/cancel', request)
+              }
+              if (!result.cancelled && connectionAttempt.current === attempt) {
+                attempt.cancelled = false
+                setCancelling(false)
+              }
+            } catch (failure) {
+              if (connectionAttempt.current !== attempt || !mounted.current) return
+              attempt.cancelled = false
+              setCancelling(false)
+              setError(formatError(failure))
+            }
+          }
+
+          const openChat = async (target, announce) => {
+            setError('')
+            setNotice('')
+            try {
+              const result = await ctx.uiWorkspace.openSession(target)
+              if (result === false || result?.ok === false) throw new Error()
+              revealPanel()
+              if (announce) setNotice(text(tt, 'promptNote', '已打开 SSH 聊天。'))
+            } catch {
+              setError(text(tt, 'chatOpenFailed', zh.chatOpenFailed))
+            }
+          }
+
           const connect = async (profile, reconnectSession) => {
+            if (connectionAttempt.current !== null) return
+            const attempt = { id: newId(), hostId: profile.id, cancelled: false, sent: false }
+            connectionAttempt.current = attempt
+            setConnecting(profile.id)
             setBusy(profile.id)
             setError('')
             setNotice('')
@@ -1818,8 +1922,11 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                 createdSession = reconnectSession
               }
               if (typeof createdSession !== 'string') throw new Error(text(tt, 'noSessionId', '新聊天没有返回会话 ID。'))
+              if (attempt.cancelled) throw new Error()
               try {
+                attempt.sent = true
                 await api('connect', {
+                  attemptId: attempt.id,
                   hostId: profile.id,
                   name: profile.name,
                   ...bindingOfProfile(profile),
@@ -1864,9 +1971,17 @@ For destructive operations (deleting files, changing system config, reboot/shutd
               if (reconnectSession === undefined && createdSession !== undefined && !keepSession) {
                 try { await ctx.uiWorkspace.archiveSession(createdSession) } catch { /* 已打开或无法归档。 */ }
               }
-              if (mounted.current) setError(`${text(tt, 'connectFailed', '连接失败')}：${formatError(failure)}`)
+              if (mounted.current) {
+                if (attempt.cancelled) setNotice(text(tt, 'connectionCancelled', zh.connectionCancelled))
+                else setError(text(tt, 'connectFailed', '连接失败') + '：' + formatError(failure))
+              }
             } finally {
-              if (mounted.current) setBusy(null)
+              connectionAttempt.current = null
+              if (mounted.current) {
+                setBusy(null)
+                setConnecting(null)
+                setCancelling(false)
+              }
             }
           }
 
@@ -2224,16 +2339,13 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   }, isBusy ? text(tt, 'connecting', '正在连接…') : reconnectSession === undefined
                     ? text(tt, 'connect', '连接') : text(tt, 'reconnect', '在原聊天中重连'))
                   : null,
+                connecting === profile.id ? h('button', { type: 'button', className: 'dsh-ssh-btn', disabled: cancelling, onClick: () => void cancelConnect() },
+                  cancelling ? text(tt, 'cancellingConnect', zh.cancellingConnect) : text(tt, 'cancelConnect', zh.cancelConnect)) : null,
                 showOpenChat
                   ? h('button', {
                     type: 'button', className: `dsh-ssh-btn${showConnect ? '' : ' dsh-ssh-btn-primary'}`, disabled: busy !== null,
                     title: text(tt, 'openChatHint', '打开这个聊天（未发送过消息的聊天会被列表过滤，但内容和草稿都还在）'),
-                    onClick: () => {
-                      // 只打开会话；提示词已在连接时复制到剪贴板，由用户自行粘贴。
-                      try { ctx.uiWorkspace.openSession(openChatSession) } catch { /* 保留当前页。 */ }
-                      revealPanel()
-                      if (chat?.pending !== true) setNotice(text(tt, 'promptNote', '已打开新聊天。推荐提示词在剪贴板中，粘贴到输入框后发送。'))
-                    },
+                    onClick: () => void openChat(openChatSession, chat?.pending !== true),
                   }, text(tt, 'openChat', '打开新聊天'))
                   : null,
                 // 刷新/重启后找回上次的聊天（入口级，不代表连接有效）
@@ -2241,10 +2353,7 @@ For destructive operations (deleting files, changing system config, reboot/shutd
                   ? h('button', {
                     type: 'button', className: 'dsh-ssh-btn', disabled: busy !== null,
                     title: text(tt, 'reopenHint', '回到上次为这台主机打开的聊天（内容与草稿都还在）'),
-                    onClick: () => {
-                      try { ctx.uiWorkspace.openSession(rememberedSession) } catch { /* 保留当前页。 */ }
-                      revealPanel()
-                    },
+                    onClick: () => void openChat(rememberedSession, false),
                   }, text(tt, 'reopenChat', '回到上次聊天'))
                   : null,
                  connectedSession !== undefined

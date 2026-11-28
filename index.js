@@ -662,6 +662,16 @@ function cancelPendingConnect(hostId) {
   closeAgentTerminal(attempt.terminal)
 }
 
+async function cancelConnectHandler(ctx, req, res) {
+  const parsed = await readPostBody(ctx, req, res)
+  if (!parsed.ok) return
+  const { hostId, attemptId } = parsed.body
+  const attempt = pendingConnects.get(hostId)
+  const cancelled = typeof attemptId === 'string' && attempt?.id === attemptId
+  if (cancelled) cancelPendingConnect(hostId)
+  return writeJson(res, 200, { ok: true, cancelled })
+}
+
 async function connectHandler(ctx, req, res) {
   const parsed = await readPostBody(ctx, req, res)
   if (!parsed.ok) return
@@ -674,7 +684,7 @@ async function connectHandler(ctx, req, res) {
     return writeJson(res, 409, { ok: false, code: 'connect-busy', message: msg("该聊天已有连接正在进行，请等待完成。", "A connection is already in progress for this chat; wait for it to finish.") })
   }
   connectLocks.add(sessionId)
-  const attempt = { cancelled: false, terminal: undefined }
+  const attempt = { id: body.attemptId, cancelled: false, terminal: undefined }
   pendingConnects.set(hostId, attempt)
   let keepTerminal = false
   try {
@@ -1322,25 +1332,25 @@ async function resolveFsTarget(ctx, res, hostId) {
 // ---------- 远端 POSIX 命令（抽成纯函数，便于在本机 sh 里直接验证） ----------
 
 /** GNU find：一次拿到 类型/大小/时间/权限/名字。 */
-function fsGnuListCommand(dir) {
-  return `echo ${FS_BEGIN}; find ${posixQuote(dir)} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%T@\\t%m\\t%f\\n' 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+function fsGnuListCommand(dir, limit = FS_MAX_ENTRIES) {
+  return `echo ${FS_BEGIN}; find ${posixQuote(dir)} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%T@\\t%m\\t%f\\n' 2>/dev/null | head -n ${limit}; echo ${FS_END}`
 }
 
 /**
  * 非 GNU（BusyBox/BSD/macOS）：ls -la 输出传统日期（"Nov 18 12:00"），由 parseLsOutput 解析。
  * LC_ALL=C 固定英文月份，避免中文等本地化日期（"11月 18"）无法识别。
  */
-function fsLsListCommand(dir) {
-  return `echo ${FS_BEGIN}; LC_ALL=C ls -la ${posixQuote(dir)} 2>/dev/null | head -n ${FS_MAX_ENTRIES}; echo ${FS_END}`
+function fsLsListCommand(dir, limit = FS_MAX_ENTRIES) {
+  return `echo ${FS_BEGIN}; LC_ALL=C ls -la ${posixQuote(dir)} 2>/dev/null | head -n ${limit}; echo ${FS_END}`
 }
 
-function fsListCommand(dir) {
+function fsListCommand(dir, limit = FS_MAX_ENTRIES) {
   const quoted = posixQuote(dir)
   const mode = (value) => 'echo __DSH_FS_MODE_BEGIN__; echo ' + value + '; echo __DSH_FS_MODE_END__'
   return [
     'if [ ! -d ' + quoted + ' ] || [ ! -r ' + quoted + ' ] || [ ! -x ' + quoted + ' ]; then ' + mode('__ERR__'),
-    'elif find ' + quoted + ' -maxdepth 0 -printf "" >/dev/null 2>&1; then ' + mode('__GNU__') + '; ' + fsGnuListCommand(dir),
-    'else ' + mode('__LS__') + '; ' + fsLsListCommand(dir),
+    'elif find ' + quoted + ' -maxdepth 0 -printf "" >/dev/null 2>&1; then ' + mode('__GNU__') + '; ' + fsGnuListCommand(dir, limit + 1),
+    'else ' + mode('__LS__') + '; ' + fsLsListCommand(dir, limit + 4),
     'fi',
   ].join('\n')
 }
@@ -1399,7 +1409,8 @@ async function fsListHandler(ctx, req, res) {
   const target = resolved.target
 
   try {
-    const raw = await execRemote(target, fsListCommand(dir), { timeoutMs: 20_000 })
+    const limit = Number.isInteger(body.limit) ? Math.max(FS_MAX_ENTRIES, Math.min(5000, body.limit)) : FS_MAX_ENTRIES
+    const raw = await execRemote(target, fsListCommand(dir, limit), { timeoutMs: 20_000 })
     const mode = extractMarkedLines(raw, '__DSH_FS_MODE_BEGIN__', '__DSH_FS_MODE_END__')?.[0]
     if (mode === '__ERR__') {
       return writeJson(res, 404, { ok: false, code: 'dir-unreadable', message: msg("目录不存在或没有读取权限。", "The directory does not exist or is not readable.") })
@@ -1414,7 +1425,8 @@ async function fsListHandler(ctx, req, res) {
       ok: true,
       path: dir,
       parent: dir === '/' ? null : dir.replace(/\/[^/]+$/, '') || '/',
-      entries,
+      entries: entries.slice(0, limit),
+      hasMore: entries.length > limit,
     })
   } catch (error) {
     return writeJson(res, 500, {
@@ -1863,25 +1875,31 @@ async function saveUploadBody(req, filePath, size) {
   } finally { await file.close() }
 }
 
-function uploadCheckCommand(destination, verify = false) {
+function uploadCheckCommand(destination, verify = false, hashSize) {
   const file = posixQuote(destination)
   const parent = posixQuote(destination.slice(0, destination.lastIndexOf('/') + 1))
+  const hash = Number.isSafeInteger(hashSize) && hashSize >= 0 && hashSize <= MAX_UPLOAD_BYTES
+    ? 'if [ "$size" = ' + hashSize + ' ]; then digest=$({ sha256sum 2>/dev/null || shasum -a 256 2>/dev/null; } < ' + file + '); printf "__DSH_UPLOAD_SHA256__ %s\\n" "${digest%% *}"; fi'
+    : ''
   return `if [ ! -d ${parent} ] || [ ! -x ${parent} ]${verify ? '' : ` || [ ! -w ${parent} ]`}; then printf '%s\\n' __DSH_UPLOAD_DIR_UNAVAILABLE__
 elif [ -L ${file} ] || { [ -e ${file} ] && [ ! -f ${file} ]; }; then printf '%s\\n' __DSH_UPLOAD_TARGET_UNSUPPORTED__
 elif [ -f ${file} ]; then
   size=$(stat -c %s ${file} 2>/dev/null || stat -f %z ${file} 2>/dev/null) || size=
   printf '__DSH_UPLOAD_FILE__ %s\\n' "$size"
+  ${hash}
 else printf '%s\\n' __DSH_UPLOAD_NEW__
 fi`
 }
 
 function parseUploadCheck(output) {
-  for (const line of output.split(/\r?\n/u)) {
+  const lines = output.split(/\r?\n/u)
+  const digest = lines.map(line => /^__DSH_UPLOAD_SHA256__ ([a-f0-9]{64})$/u.exec(line)).find(Boolean)?.[1]
+  for (const line of lines) {
     if (line === '__DSH_UPLOAD_NEW__') return { exists: false }
     if (line === '__DSH_UPLOAD_DIR_UNAVAILABLE__') return { code: 'upload-dir-unavailable' }
     if (line === '__DSH_UPLOAD_TARGET_UNSUPPORTED__') return { code: 'upload-target-unsupported' }
     const match = /^__DSH_UPLOAD_FILE__ (\d*)$/u.exec(line)
-    if (match !== null) return match[1] === '' ? { exists: true } : { exists: true, size: Number(match[1]) }
+    if (match !== null) return match[1] === '' ? { exists: true } : { exists: true, size: Number(match[1]), ...(digest ? { digest } : {}) }
   }
   return undefined
 }
@@ -1902,7 +1920,7 @@ async function fsUploadCheckHandler(ctx, req, res) {
     return writeJson(res, 409, changedConnection())
   }
   try {
-    const result = parseUploadCheck(await execRemote(resolved.target, uploadCheckCommand(destination, parsed.body.verify === true), { timeoutMs: 12_000, maxBytes: 8192 }))
+    const result = parseUploadCheck(await execRemote(resolved.target, uploadCheckCommand(destination, parsed.body.verify === true, parsed.body.verify === true ? parsed.body.hashSize : undefined), { timeoutMs: 12_000, maxBytes: 8192 }))
     if (latestHostConnection(hostId) !== connection) return writeJson(res, 409, changedConnection())
     if (result?.code === 'upload-dir-unavailable') return writeJson(res, 409, { ok: false, code: result.code, message: parsed.body.verify === true ? msg('无法访问目标目录。', 'The destination directory is inaccessible.') : msg('目标目录不存在或不可写。', 'The destination directory is missing or not writable.') })
     if (result?.code === 'upload-target-unsupported') return writeJson(res, 409, { ok: false, code: result.code, message: msg('同名目录或链接已存在，请更换文件名。', 'A directory or link has that name. Choose a different file name.') })
@@ -2497,6 +2515,7 @@ export const inject = ['webServer']
 export function apply(ctx) {
   const routes = [
     { path: `${API_ROOT}/connect`, handler: (req, res) => connectHandler(ctx, req, res) },
+    { path: `${API_ROOT}/connect/cancel`, handler: (req, res) => cancelConnectHandler(ctx, req, res) },
     { path: `${API_ROOT}/disconnect`, handler: (req, res) => disconnectHandler(ctx, req, res) },
     { path: `${API_ROOT}/close-terminal`, handler: (req, res) => closeTerminalHandler(ctx, req, res) },
     { path: `${API_ROOT}/credentials`, handler: (req, res) => saveCredentialHandler(ctx, req, res) },

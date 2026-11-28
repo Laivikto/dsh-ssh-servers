@@ -1,4 +1,17 @@
 {
+  "cancelConnect": "Cancel connection",
+  "cancellingConnect": "Cancelling…",
+  "connectionCancelled": "Connection cancelled.",
+  "chatOpenFailed": "Could not open the chat. Retry or check whether it is still in the chat list.",
+  "listPartial": "Showing a partial list. Filtering applies to loaded entries.",
+  "listLimit": "Reached the 5,000-entry display limit.",
+  "loadMore": "Load more",
+  "noFileMatches": "No matches among loaded files.",
+  "uploadCheckContents": "Verify file contents",
+  "uploadContentMatches": "File contents match.",
+  "uploadContentMismatch": "Destination file contents differ.",
+  "uploadContentUnavailable": "Could not read the server SHA-256 checksum.",
+  "uploadDismiss": "Finish checking",
   "meta": {
     "title": "SSH",
     "description": "Connect to remote hosts, browse files, and open terminal sessions."

@@ -1,4 +1,17 @@
 {
+  "cancelConnect": "取消连接",
+  "cancellingConnect": "正在取消…",
+  "connectionCancelled": "已取消连接。",
+  "chatOpenFailed": "无法打开聊天。请重试，或在会话列表检查该聊天是否还在。",
+  "listPartial": "仅显示部分文件，筛选范围为已加载条目。",
+  "listLimit": "已达到 5,000 项显示上限。",
+  "loadMore": "加载更多",
+  "noFileMatches": "已加载的文件中没有匹配项。",
+  "uploadCheckContents": "校验文件内容",
+  "uploadContentMatches": "文件内容一致。",
+  "uploadContentMismatch": "目标文件内容不同。",
+  "uploadContentUnavailable": "无法读取服务器的 SHA-256 校验值。",
+  "uploadDismiss": "结束核对",
   "meta": {
     "title": "SSH 服务",
     "description": "连接远程主机，浏览文件并开启终端会话。"

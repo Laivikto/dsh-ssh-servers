@@ -133,6 +133,8 @@ test('解析上传预检的当前文件大小以及目标不可用状态', () =>
   assert.deepEqual(T.parseUploadCheck('__DSH_UPLOAD_FILE__ 321\r\n'), { exists: true, size: 321 })
   assert.deepEqual(T.parseUploadCheck('__DSH_UPLOAD_TARGET_UNSUPPORTED__\n'), { code: 'upload-target-unsupported' })
   assert.equal(T.parseUploadCheck('unrelated'), undefined)
+  const digest = 'a'.repeat(64)
+  assert.deepEqual(T.parseUploadCheck('__DSH_UPLOAD_FILE__ 321\n__DSH_UPLOAD_SHA256__ ' + digest), { exists: true, size: 321, digest })
 })
 
 // ---------------- #1 ----------------
